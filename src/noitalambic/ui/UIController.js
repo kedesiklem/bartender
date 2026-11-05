@@ -1,4 +1,5 @@
-import {iconLabel} from "../../ui/icons.js";
+import {html} from "htl";
+import {icon, iconLabel} from "../../ui/icons.js";
 import {setControlDisabled} from '../../ui/disabled.js';
 import {numberText} from '../../ui/format.js';
 // ============================================================================
@@ -7,6 +8,9 @@ import {numberText} from '../../ui/format.js';
 
 import { CONFIG } from "../config/config.js";
 import { UIHelper } from "./UIHelper.js";
+import { downloadBlob } from "./download.js";
+import { buildStandaloneSvg } from "../graph/SvgExporter.js";
+import { EXPORT_FORMATS, rasterizeSvg } from "../graph/rasterizeSvg.js";
 
 export class UIController {
   // reactionSetWorkspace/reactionSetPanel are optional: they are only set when the multi-set
@@ -37,115 +41,103 @@ export class UIController {
       'Material availability has only been audited for the base game.');
   }
 
-  createExportButton(Inputs, htl) {
-    this.exportButton = Inputs.button(iconLabel("download", "Export SVG"), {
-      reduce: () => {
-        this.exportGraphAsSVG();
-        return null;
-      },
-    });
+  // Split button: the main part exports SVG; the arrow, part of the same button, opens a menu
+  // with the raster formats (Bootstrap menu, kept in place so it also works in fullscreen).
+  createExportButton() {
+    const main = html`<button type="button" class="btn-outline theme-secondary" data-export-format="svg">${iconLabel("download", "Export SVG")}</button>`;
+    const toggle = html`<button type="button" class="btn-outline theme-secondary export-format-toggle" data-bs-toggle="menu"
+      aria-expanded="false" aria-label="Other export formats" title="Other export formats">${icon("chevron-down")}</button>`;
+    const items = ["png", "jpeg"].map((format) =>
+      html`<button type="button" class="menu-item" data-export-format=${format}>Export ${EXPORT_FORMATS[format].label}</button>`);
+    this.exportButton = html`<span class="action-control"><div class="btn-group" role="group" aria-label="Export graph">${main}${toggle}<div class="menu">${items}</div></div></span>`;
+
+    this.exportButton.querySelectorAll("[data-export-format]").forEach((el) =>
+      el.addEventListener("click", () => this.exportGraph(el.dataset.exportFormat)));
+    this._loadMenu().catch((error) => console.error("Export menu unavailable", error));
     this.updateExportButton();
     return this.exportButton;
   }
 
+  // Bootstrap's menu registers its data API (data-bs-toggle="menu") on import.
+  _loadMenu() {
+    return import("bootstrap/js/dist/menu.js");
+  }
+
   updateExportButton() {
-    if (this.exportButton) setControlDisabled(this.exportButton.querySelector('button'), !document.querySelector('#graphContainer svg'),
-      'Choose filters that produce a graph before exporting.');
+    if (!this.exportButton) return;
+    const disabled = !document.querySelector("#graphContainer svg");
+    this.exportButton.querySelectorAll(".btn-group > button").forEach((button) =>
+      setControlDisabled(button, disabled, "Choose filters that produce a graph before exporting."));
   }
 
   exportGraphAsSVG() {
-    const svgElement = document.querySelector("#graphContainer svg");
+    return this.exportGraph("svg");
+  }
 
+  // Downloads the whole graph as SVG, PNG or JPEG: no zoom/pan crop, no highlight, page
+  // background included and material images embedded, so the file renders offline anywhere.
+  // Raster formats are rendered from that same standalone SVG.
+  async exportGraph(format = "svg") {
+    const target = EXPORT_FORMATS[format];
+    if (!target) throw new Error(`Unknown export format "${format}"`);
+    const svgElement = document.querySelector("#graphContainer svg");
     if (!svgElement) {
       UIHelper.showNotification("No graph to export");
       return;
     }
 
-    // Clone the SVG to avoid modifying the original
-    const clonedSvg = svgElement.cloneNode(true);
-
-    // Bake the ACTUAL rendered colors into the clone before anything else changes it. A
-    // standalone exported .svg file has no access to this page's stylesheets (custom.css, or
-    // any <style> injected elsewhere in the document) - only whatever travels as attributes/
-    // inline styles on the elements themselves. Material node colors are normally set as a
-    // plain inline "fill" attribute, but presentation attributes lose to CSS rules in the
-    // cascade: any stylesheet rule that happens to target these nodes on screen (even
-    // unintentionally, e.g. a generic "circle" or theme selector in custom.css) silently wins
-    // live and is exactly what disappears on export, since none of that CSS travels with the
-    // file. Reading the live, computed fill/stroke of every element and writing it back as an
-    // explicit inline style on the clone guarantees the export matches what is actually on
-    // screen, regardless of where that color came from.
-    this._inlineComputedColors(svgElement, clonedSvg);
-
-    // Remove interactive elements that might interfere with display
-    const removeElements = clonedSvg.querySelectorAll('.tag-visibility-icon');
-    removeElements.forEach((el) => el.remove());
-
-    // Ensure proper styling for export. Uses the SVG namespace explicitly - document.createElement
-    // always creates an HTML-namespaced element, which is invalid once this file is reopened as
-    // standalone SVG/XML rather than embedded in this HTML page, and can cause stricter SVG
-    // parsers to reject or mishandle the whole document.
-    const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
-    style.textContent = `
-      .node-label { font-family: Arial, sans-serif; }
-      .material-image { image-rendering: optimizeQuality; }
-    `;
-    clonedSvg.insertBefore(style, clonedSvg.firstChild);
-
-    // Serialize SVG
-    const serializer = new XMLSerializer();
-    let svgString = serializer.serializeToString(clonedSvg);
-
-    // Add XML declaration and proper namespaces
-    if (!svgString.includes("<?xml")) {
-      svgString = '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' + svgString;
+    const embedImage = await this._loadImageEmbedder().catch(() => null);
+    const background = UIHelper.backgroundColorOf(svgElement);
+    // The clone (and its computed colors) is taken synchronously inside withoutHighlight; only
+    // the image embedding that follows is asynchronous, and it works on the clone alone.
+    let blob, externalImages;
+    try {
+      const svg = await this._withoutHighlight(() => buildStandaloneSvg(svgElement, { background, embedImage: embedImage ?? undefined }));
+      externalImages = svg.externalImages;
+      blob = format === "svg"
+        ? new Blob([svg.text], { type: "image/svg+xml;charset=utf-8" })
+        : await this._rasterize(svg.text, { width: svg.width, height: svg.height, mime: target.mime, quality: target.quality, background });
+    } catch (error) {
+      console.error(`${target.label} export failed`, error);
+      UIHelper.showNotification(`${target.label} export failed`);
+      return;
     }
 
-    // Create download link
-    const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-
-    // Generate filename with current selections
-    let filename = "reactions_graph";
-    if (this.state.selectedReagents.length > 0) {
-      filename += `_reagents_${this.state.selectedReagents.join("_")}`;
-    }
-    if (this.state.selectedProduct) {
-      filename += `_product_${this.state.selectedProduct}`;
-    }
-    filename += ".svg";
-
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-
-    UIHelper.showNotification("Graph exported as SVG");
+    downloadBlob(blob, this._exportFileName(target.extension));
+    const missing = `${externalImages} image${externalImages > 1 ? "s" : ""} could not be embedded`;
+    UIHelper.showNotification(
+      externalImages > 0
+        ? `Graph exported as ${target.label} (${missing}${format === "svg" ? " and still need the network" : " and are missing"})`
+        : `Graph exported as ${target.label}`,
+    );
   }
 
-  // Copies the live, computed fill/stroke of every element in liveRoot onto the corresponding
-  // element in cloneRoot. Both trees must still be structurally identical when this runs (call
-  // it right after cloneNode(true), before removing or otherwise mutating the clone), since
-  // pairing is done by matching traversal order via querySelectorAll("*").
-  _inlineComputedColors(liveRoot, cloneRoot) {
-    const liveElements = liveRoot.querySelectorAll("*");
-    const cloneElements = cloneRoot.querySelectorAll("*");
+  // Separate so tests can stub it: jsdom has no canvas.
+  _rasterize(svgText, options) {
+    return rasterizeSvg(svgText, options);
+  }
 
-    liveElements.forEach((liveEl, index) => {
-      const cloneEl = cloneElements[index];
-      if (!cloneEl) return;
+  _withoutHighlight(fn) {
+    return this.graphRenderer?.withoutHighlight ? this.graphRenderer.withoutHighlight(fn) : fn();
+  }
 
-      const computed = window.getComputedStyle(liveEl);
-      if (computed.fill && computed.fill !== "none") {
-        cloneEl.style.fill = computed.fill;
-      }
-      if (computed.stroke && computed.stroke !== "none") {
-        cloneEl.style.stroke = computed.stroke;
-      }
-    });
+  // Separate so tests can stub it: the real module relies on Vite's import.meta.glob.
+  async _loadImageEmbedder() {
+    const { embedMaterialImage } = await import("../graph/materialImageEmbedder.js");
+    return embedMaterialImage;
+  }
+
+  // reactions_graph[_<selection>]_<date>.<extension>. The classic selection names the file; in advanced
+  // mode the global selection doesn't describe the graph (the sets do), so it is left out.
+  _exportFileName(extension = "svg") {
+    const parts = ["reactions_graph"];
+    if (!this.reactionSetWorkspace) {
+      if (this.state.selectedReagents.length > 0) parts.push("reagents", ...this.state.selectedReagents);
+      if (this.state.selectedProduct) parts.push("product", this.state.selectedProduct);
+    }
+    const date = new Date().toISOString().slice(0, 10);
+    const base = parts.join("_").replace(/[^\w.-]+/g, "-").slice(0, 100);
+    return `${base}_${date}.${extension}`;
   }
 
   updateChoicesOptions() {

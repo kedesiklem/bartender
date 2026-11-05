@@ -18,8 +18,8 @@
 
 import { ChoicesInitializer } from "./ChoicesInitializer.js";
 import { UIHelper } from "./UIHelper.js";
+import { downloadBlob } from "./download.js";
 import { GROUP_MODES } from "../core/ReactionGroupTree.js";
-import { ShortcutManager } from "../core/ShortcutManager.js";
 
 const GROUP_MODE_LABELS = {
   union: "Union - any child",
@@ -43,7 +43,7 @@ function escapeHtml(str = "") {
 export class ReactionSetPanel {
   static _stylesInjected = false;
 
-  constructor({ workspace, resolver, reactionFilter, dataRepo, eventBus, ChoicesLib, onSetsResolved, storage = null, shortcutManager = null, hideable = true }) {
+  constructor({ workspace, resolver, reactionFilter, dataRepo, eventBus, ChoicesLib, onSetsResolved, storage = null, hideable = true }) {
     this.workspace = workspace;
     this.resolver = resolver;
     this.reactionFilter = reactionFilter;
@@ -52,7 +52,6 @@ export class ReactionSetPanel {
     this.Choices = ChoicesLib;
     this.onSetsResolved = onSetsResolved || (() => {});
     this.storage = storage || (typeof window !== "undefined" && window.localStorage ? window.localStorage : null);
-    this.shortcutManager = shortcutManager;
 
     this.container = null;
     this._choicesInstances = new Map(); // setId -> { reagentChoices, productChoices }
@@ -177,7 +176,6 @@ export class ReactionSetPanel {
           ${this.hideable ? `<button type="button" class="rsp-btn" data-action="hide-panel" title="Hide this panel">Hide panel</button>` : ""}
         </div>
 
-        ${this._renderShortcutsSection()}
 
         <div class="rsp-bulk-actions">
           <button type="button" data-action="collapse-all" title="Fold every set and group down to their header">Collapse all</button>
@@ -341,48 +339,6 @@ export class ReactionSetPanel {
     `;
   }
 
-  // Only rendered when a ShortcutManager was provided to the constructor (optional feature).
-  _renderShortcutsSection() {
-    if (!this.shortcutManager) return "";
-
-    const triggerOptions = [
-      ["click", "Click"],
-      ["dblclick", "Double-click"],
-      ["contextmenu", "Right-click"],
-    ];
-
-    const rows = this.shortcutManager
-      .getAllActions()
-      .map((action) => {
-        const combo = this.shortcutManager.getBinding(action);
-        const options = triggerOptions
-          .map(([value, label]) => `<option value="${value}" ${combo.trigger === value ? "selected" : ""}>${label}</option>`)
-          .join("");
-        return `
-          <div class="rsp-shortcut-row" data-shortcut-action="${action}">
-            <span class="rsp-shortcut-label">${escapeHtml(this.shortcutManager.getLabel(action))}</span>
-            <select data-role="trigger">${options}</select>
-            <label><input type="checkbox" data-role="mod-ctrl" ${combo.ctrl ? "checked" : ""} /> Ctrl</label>
-            <label><input type="checkbox" data-role="mod-shift" ${combo.shift ? "checked" : ""} /> Shift</label>
-            <label><input type="checkbox" data-role="mod-alt" ${combo.alt ? "checked" : ""} /> Alt</label>
-            <span class="rsp-shortcut-combo" data-role="combo-label">${ShortcutManager.formatCombo(combo)}</span>
-          </div>
-        `;
-      })
-      .join("");
-
-    return `
-      <details class="rsp-shortcuts">
-        <summary>Keyboard shortcuts</summary>
-        <div class="rsp-shortcuts-body">
-          <p class="rsp-shortcuts-hint">Every graph node interaction below can be reassigned to any trigger and modifier combination. No two actions can share the same one.</p>
-          ${rows}
-          <button type="button" data-action="reset-shortcuts">Reset to defaults</button>
-        </div>
-      </details>
-    `;
-  }
-
   // -------------------------------------------------------------------
   // Global controls
   // -------------------------------------------------------------------
@@ -393,8 +349,6 @@ export class ReactionSetPanel {
     this.container.querySelector('[data-role="keyboard-accessible"]').addEventListener("change", () => {
       this._toggleKeyboardAccessible();
     });
-
-    this._bindShortcutsSection();
 
     this.container.querySelector('[data-action="collapse-all"]').addEventListener("click", () => {
       this.workspace.collapseAll();
@@ -471,44 +425,6 @@ export class ReactionSetPanel {
     });
   }
 
-  // Only wired when a ShortcutManager was provided to the constructor (optional feature).
-  _bindShortcutsSection() {
-    if (!this.shortcutManager) return;
-
-    this.container.querySelectorAll(".rsp-shortcut-row").forEach((row) => {
-      const action = row.dataset.shortcutAction;
-      const triggerEl = row.querySelector('[data-role="trigger"]');
-      const ctrlEl = row.querySelector('[data-role="mod-ctrl"]');
-      const shiftEl = row.querySelector('[data-role="mod-shift"]');
-      const altEl = row.querySelector('[data-role="mod-alt"]');
-      const comboLabel = row.querySelector('[data-role="combo-label"]');
-
-      const applyChange = () => {
-        const combo = { trigger: triggerEl.value, ctrl: ctrlEl.checked, shift: shiftEl.checked, alt: altEl.checked };
-        const result = this.shortcutManager.setBinding(action, combo);
-        if (!result.ok) {
-          UIHelper.showNotification(result.error);
-          const current = this.shortcutManager.getBinding(action);
-          triggerEl.value = current.trigger;
-          ctrlEl.checked = current.ctrl;
-          shiftEl.checked = current.shift;
-          altEl.checked = current.alt;
-        }
-        comboLabel.textContent = ShortcutManager.formatCombo(this.shortcutManager.getBinding(action));
-      };
-
-      [triggerEl, ctrlEl, shiftEl, altEl].forEach((el) => el.addEventListener("change", applyChange));
-    });
-
-    const resetBtn = this.container.querySelector('[data-action="reset-shortcuts"]');
-    if (resetBtn) {
-      resetBtn.addEventListener("click", () => {
-        this.shortcutManager.resetToDefaults();
-        this._rebuild();
-      });
-    }
-  }
-
   _refreshSavedConfigsSelect() {
     const select = this.container.querySelector('[data-role="saved-configs"]');
     if (!select) return;
@@ -522,7 +438,7 @@ export class ReactionSetPanel {
   _downloadConfig() {
     const data = this.workspace.serialize();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    this._triggerDownload(blob, `noitalambic-reaction-sets-${Date.now()}.json`);
+    downloadBlob(blob, `noitalambic-reaction-sets-${Date.now()}.json`);
     UIHelper.showNotification("Configuration downloaded");
   }
 
@@ -537,19 +453,8 @@ export class ReactionSetPanel {
 
     const csv = [headers.join(","), ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    this._triggerDownload(blob, `noitalambic-reactions-${Date.now()}.csv`);
+    downloadBlob(blob, `noitalambic-reactions-${Date.now()}.csv`);
     UIHelper.showNotification("Reactions exported as CSV");
-  }
-
-  _triggerDownload(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
   }
 
   // -------------------------------------------------------------------
@@ -1122,75 +1027,6 @@ export class ReactionSetPanel {
       .rsp-bulk-actions {
         display: flex;
         gap: 6px;
-      }
-
-      .rsp-shortcuts summary {
-        cursor: pointer;
-        font-size: 12px;
-        color: var(--fg-1);
-      }
-
-      .rsp-shortcuts-body {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        margin-top: 8px;
-      }
-
-      .rsp-shortcuts-hint {
-        margin: 0;
-        font-size: 11px;
-        color: var(--fg-3);
-      }
-
-      .rsp-shortcut-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex-wrap: wrap;
-        font-size: 11px;
-        border: 1px solid var(--border-color);
-        border-radius: var(--radius-3);
-        padding: 6px;
-      }
-
-      .rsp-shortcut-label {
-        flex: 1;
-        min-width: 140px;
-        color: var(--fg-3);
-      }
-
-      .rsp-shortcut-row label {
-        display: flex;
-        align-items: center;
-        gap: 3px;
-        white-space: nowrap;
-      }
-
-      .rsp-shortcut-row select[data-role="trigger"] {
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border: 1px solid var(--border-color);
-        border-radius: var(--radius-3);
-        padding: 3px;
-        font-size: 11px;
-      }
-
-      .rsp-shortcut-combo {
-        font-weight: bold;
-        color: var(--fg-1);
-        white-space: nowrap;
-      }
-
-      .rsp-shortcuts-body button {
-        align-self: flex-start;
-        cursor: pointer;
-        border: 1px solid var(--border-color);
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border-radius: var(--radius-3);
-        padding: 4px 8px;
-        font-size: 11px;
       }
 
       .rsp-bulk-actions button {

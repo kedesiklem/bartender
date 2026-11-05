@@ -56,7 +56,6 @@ async function setupDom() {
   const { ReactionSetWorkspace } = await import("../core/ReactionSetWorkspace.js");
   const { ReactionGroupResolver } = await import("../core/ReactionGroupResolver.js");
   const { InMemoryStorage } = await import("../core/ReactionSetManager.js");
-  const { ShortcutManager } = await import("../core/ShortcutManager.js");
   const { ReactionSetPanel } = await import("../ui/ReactionSetPanel.js");
 
   const eventBus = new EventBus();
@@ -65,7 +64,6 @@ async function setupDom() {
   const workspace = new ReactionSetWorkspace(eventBus, new InMemoryStorage());
   const resolver = new ReactionGroupResolver(reactionFilter);
   const panelStorage = new InMemoryStorage();
-  const shortcutManager = new ShortcutManager(new InMemoryStorage());
 
   let lastResult = null;
   const panel = new ReactionSetPanel({
@@ -76,13 +74,12 @@ async function setupDom() {
     eventBus,
     ChoicesLib: ChoicesStub,
     storage: panelStorage,
-    shortcutManager,
     onSetsResolved: (result) => {
       lastResult = result;
     },
   });
 
-  return { dom, workspace, panel, panelStorage, shortcutManager, getLastResult: () => lastResult };
+  return { dom, workspace, panel, panelStorage, getLastResult: () => lastResult };
 }
 
 test("mount() creates a default set and renders the root group with one set card", async () => {
@@ -449,79 +446,6 @@ test("_performSiblingDrop is a no-op when dropping a node onto itself", async ()
   panel._performSiblingDrop(setA.id, setA.id, "before");
 
   assert.deepEqual(workspace.tree.root.children, [setA.id]);
-});
-
-// -------------------------------------------------------------------
-// Configurable shortcuts section
-// -------------------------------------------------------------------
-
-test("the shortcuts section renders one row per action with the default combo shown", async () => {
-  const { panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-
-  const rows = document.querySelectorAll(".rsp-shortcut-row");
-  assert.equal(rows.length, 6);
-  const reagentRow = document.querySelector('[data-shortcut-action="addReagentToNewSet"]');
-  assert.equal(reagentRow.querySelector('[data-role="combo-label"]').textContent, "Alt+Click");
-  const tagRow = document.querySelector('[data-shortcut-action="openTagMenu"]');
-  assert.equal(tagRow.querySelector('[data-role="combo-label"]').textContent, "Right-click");
-});
-
-test("checking a modifier updates the binding and the live combo label", async () => {
-  const { panel, shortcutManager } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-
-  const row = document.querySelector('[data-shortcut-action="addReagentToNewSet"]');
-  const ctrlBox = row.querySelector('[data-role="mod-ctrl"]');
-  ctrlBox.checked = true;
-  ctrlBox.dispatchEvent(new window.Event("change", { bubbles: true }));
-
-  assert.deepEqual(shortcutManager.getBinding("addReagentToNewSet"), { trigger: "click", ctrl: true, shift: false, alt: true });
-  assert.equal(row.querySelector('[data-role="combo-label"]').textContent, "Ctrl+Alt+Click");
-});
-
-test("changing the trigger selector updates the binding and the live combo label", async () => {
-  const { panel, shortcutManager } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-
-  const row = document.querySelector('[data-shortcut-action="openTagMenu"]');
-  const triggerEl = row.querySelector('[data-role="trigger"]');
-  triggerEl.value = "dblclick";
-  triggerEl.dispatchEvent(new window.Event("change", { bubbles: true }));
-
-  assert.deepEqual(shortcutManager.getBinding("openTagMenu"), { trigger: "dblclick", ctrl: false, shift: false, alt: false });
-  assert.equal(row.querySelector('[data-role="combo-label"]').textContent, "Double-click");
-});
-
-test("picking a combo already used by another action is rejected and the controls revert", async () => {
-  const { panel, shortcutManager } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-
-  const row = document.querySelector('[data-shortcut-action="addReagentToNewSet"]');
-  const ctrlBox = row.querySelector('[data-role="mod-ctrl"]');
-  const altBox = row.querySelector('[data-role="mod-alt"]');
-
-  // Land directly on plain Ctrl+Click (already used by selectAsReagent) by setting both
-  // checkboxes to their target state before the single change event fires.
-  ctrlBox.checked = true;
-  altBox.checked = false;
-  ctrlBox.dispatchEvent(new window.Event("change", { bubbles: true }));
-
-  assert.deepEqual(shortcutManager.getBinding("addReagentToNewSet"), { trigger: "click", ctrl: false, shift: false, alt: true });
-  assert.equal(ctrlBox.checked, false, "the checkbox must revert to the still-valid binding");
-  assert.equal(altBox.checked, true, "the checkbox must revert to the still-valid binding");
-});
-
-test("reset-shortcuts restores the default bindings", async () => {
-  const { panel, shortcutManager } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-
-  shortcutManager.setBinding("addReagentToNewSet", { trigger: "click", ctrl: true, shift: false, alt: true });
-  panel._rebuild();
-
-  document.querySelector('[data-action="reset-shortcuts"]').dispatchEvent(new window.Event("click", { bubbles: true }));
-
-  assert.deepEqual(shortcutManager.getBinding("addReagentToNewSet"), { trigger: "click", ctrl: false, shift: false, alt: true });
 });
 
 // -------------------------------------------------------------------

@@ -1,13 +1,19 @@
 import {CONFIG} from "../config/config.js";
 import {iconPaths} from '../../generated/bootstrap-icons.js';
+import {getSharedShortcutManager} from "../core/ShortcutManager.js";
+import {ShortcutEditor} from "./ShortcutEditor.js";
 
 export class LegendManager {
-  static create() {
+  static _editor = null;
+
+  static create(shortcutManager = getSharedShortcutManager()) {
+    this._editor?.unmount();
     document.getElementById('graph-legend')?.remove();
     const legend = document.createElement('div');
     legend.id = 'graph-legend'; legend.className = 'accordion mt-4';
     legend.innerHTML = `<details class="accordion-item"><summary class="accordion-header">Graph legend and controls</summary><div class="accordion-body"><div class="row g-4">${this._getNodesSection()}${this._getConnectionsSection()}${this._getInteractionsSection()}</div></div></details>`;
     document.getElementById('graphContainer')?.parentElement.append(legend);
+    this._editor = new ShortcutEditor(shortcutManager).mount(legend.querySelector('[data-role="shortcut-editor"]'));
   }
   static _getNodesSection() {
     const nodes = [
@@ -86,32 +92,13 @@ export class LegendManager {
     `;
   }
 
+  // Filled by ShortcutEditor: lists the current shortcuts and lets the user rebind them.
   static _getInteractionsSection() {
-    const interactions = [
-      { keys: "Dbl Click", description: "Tag: Show/hide all materials in tag" },
-      { keys: "Ctrl+Click", description: "Material: Set as reagent" },
-      { keys: "Shift+Click", description: "Material: Set as product" },
-      { keys: "Ctrl+Shift+Click", description: "Material: Open wiki page" },
-      { keys: "Click", description: "Background: Reset highlighting" },
-    ];
-
-    const rows = interactions
-      .map(
-        (item) => `
-      <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-        <kbd class="legend-kbd legend-text">${item.keys}</kbd>
-        <span class="legend-text">${item.description}</span>
-      </div>
-    `,
-      )
-      .join("");
-
     return `
       <div class="col-12 lg:col-4">
         <h4 class="fs-6">INTERACTIONS</h4>
-        ${rows}
+        <div data-role="shortcut-editor"></div>
       </div>
     `;
   }
-
 }

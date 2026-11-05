@@ -7,18 +7,23 @@ import {icon} from '../../ui/icons.js';
 import { CONFIG } from "../config/config.js";
 import { UIHelper } from "../ui/UIHelper.js";
 import {allowGraphGesture} from './viewport.js';
+import { getSharedShortcutManager, formatCombo } from "../core/ShortcutManager.js";
 
 export class GraphRenderer {
-  // shortcutManager/onQuickAddSet are optional: pass them to enable the configurable
-  // click+modifier shortcuts that add a clicked material to a brand new reaction set (see
-  // core/ShortcutManager.js and _handleNodeClick below). Existing callers that omit them keep
-  // working exactly as before.
+  static DOUBLE_CLICK_DELAY = 300;
+
+  // Node interactions go through a ShortcutManager (core/ShortcutManager.js); the app-wide one is
+  // used when none is given. onQuickAddSet(materialId, role) enables the "add to a new set"
+  // actions; without it those shortcuts do nothing (classic mode has no sets).
   constructor(dataRepo, state, graphDataBuilder, shortcutManager = null, onQuickAddSet = null) {
     this.dataRepo = dataRepo;
     this.state = state;
     this.graphDataBuilder = graphDataBuilder;
-    this.shortcutManager = shortcutManager;
+    this.shortcutManager = shortcutManager ?? getSharedShortcutManager();
     this.onQuickAddSet = onQuickAddSet;
+    this._pendingClick = null; // single-click action waiting to see if a double-click follows
+    // Tag tooltips mention the menu shortcut: refresh them when it is rebound.
+    this._unsubscribeShortcuts = this.shortcutManager.subscribe(() => this._nodeSelection?.filter((d) => d.type === "tag").each((d, i, els) => this._updateTagNode(d, d3.select(els[i]))));
     this.currentCleanup = null;
 
     // Persistent rendering state, kept alive across render() calls. Previously every render()
@@ -97,9 +102,31 @@ export class GraphRenderer {
     }
   }
 
+  // Runs fn() with the graph in its plain, un-highlighted look, then restores the current
+  // highlight. Everything happens synchronously, so the intermediate state is never painted.
+  withoutHighlight(fn) {
+    const highlight = this._highlight;
+    if (!highlight) return fn();
+    this._resetHighlighting(highlight.allNodes);
+    try {
+      return fn();
+    } finally {
+      this._highlightConnections(highlight.node, highlight.allNodes, highlight.linkArray);
+    }
+  }
+
+  // Stops listening to shortcut changes. Call when the renderer is discarded.
+  dispose() {
+    this._cancelPendingClick();
+    this._unsubscribeShortcuts?.();
+    this._unsubscribeShortcuts = null;
+  }
+
   // Fully tears down any existing graph (used before showing an empty/too-many-reactions message,
   // and internally before a from-scratch setup).
   _teardown() {
+    this._cancelPendingClick();
+    this._highlight = null;
     if (this._resizeHandler) {
       window.removeEventListener("resize", this._resizeHandler);
       this._resizeHandler = null;
@@ -415,8 +442,9 @@ export class GraphRenderer {
     // Re-applying the click handler to the merged (enter + update) selection each time is
     // harmless/idempotent for elements that already had it - D3 simply overwrites the same
     // listener - and correctly (re)binds it for brand new nodes too.
-    nodeSelection.on("click", (event, d) => this._handleNodeClick(event, d, nodeSelection, linkArray));
-    nodeSelection.on("contextmenu", (event, d) => this._handleNodeContextMenu(event, d));
+    nodeSelection.on("click contextmenu", (event, d) => this._handleNodeEvent(event, d, nodeSelection, linkArray));
+    // Node double-clicks are shortcuts, not zoom-in requests (d3.zoom listens to dblclick on the svg).
+    nodeSelection.on("dblclick", (event) => event.stopPropagation());
 
     return nodeSelection;
   }
@@ -529,7 +557,7 @@ export class GraphRenderer {
   }
 
   // Icon/border color and tooltip depend on this.state.visibleTagMaterials, which can change
-  // (double-click) independently of the tag node itself entering or leaving the visible set.
+  // (tag menu) independently of the tag node itself entering or leaving the visible set.
   _updateTagNode(node, selection) {
     const materialIds = this.dataRepo.resolveTag(node.id);
     const hasVisibleMaterials = materialIds.some((id) => this.state.visibleTagMaterials.has(id));
@@ -552,12 +580,16 @@ export class GraphRenderer {
 
     let tooltipText;
     if (visibleCount === totalCount) {
-      tooltipText = `Tag: [${tagName}]\nAll ${totalCount} materials visible\nDouble-click to hide all`;
+      tooltipText = `Tag: [${tagName}]\nAll ${totalCount} materials visible`;
     } else if (visibleCount > 0) {
-      tooltipText = `Tag: [${tagName}]\n${visibleCount} of ${totalCount} materials visible\nDouble-click to toggle all`;
+      tooltipText = `Tag: [${tagName}]\n${visibleCount} of ${totalCount} materials visible`;
     } else {
-      tooltipText = `Tag: [${tagName}]\nAll ${totalCount} materials hidden\nDouble-click to show all`;
+      tooltipText = `Tag: [${tagName}]\nAll ${totalCount} materials hidden`;
     }
+    const toggleCombo = this.shortcutManager.getBinding("toggleTagMaterials");
+    const menuCombo = this.shortcutManager.getBinding("openTagMenu");
+    if (toggleCombo) tooltipText += `\n${formatCombo(toggleCombo)}: ${visibleCount === totalCount ? "hide" : "show"} them all`;
+    if (menuCombo) tooltipText += `\n${formatCombo(menuCombo)}: show/hide menu`;
 
     selection.select(":scope > title").text(tooltipText);
   }
@@ -656,66 +688,59 @@ export class GraphRenderer {
     });
   }
 
-  _handleNodeClick(event, node, allNodes, linkArray) {
-    event.stopPropagation();
-
-    if (node.type === "tag") {
-      if (this.shortcutManager) {
-        if (this.shortcutManager.matchesEvent("openTagMenu", event)) {
-          this._showTagContextMenu(event, node);
-          return;
-        }
-      } else if (event.detail === 2) {
-        // No shortcut manager configured: fall back to the original hardcoded double-click toggle.
-        this.state.toggleTagVisibility(node.id);
-        return;
-      }
-    }
-
-    if (node.type === "material") {
-      if (this.shortcutManager) {
-        const actionHandlers = [
-          ["addReagentToNewSet", () => this.onQuickAddSet && this.onQuickAddSet(node.id, "reagent")],
-          ["addProductToNewSet", () => this.onQuickAddSet && this.onQuickAddSet(node.id, "product")],
-          ["openMaterialWiki", () => this._openMaterialWiki(node)],
-          ["selectAsProduct", () => this._selectMaterialAsProduct(node)],
-          ["selectAsReagent", () => this._selectMaterialAsReagent(node)],
-        ];
-
-        for (const [action, handler] of actionHandlers) {
-          if (this.shortcutManager.matchesEvent(action, event)) {
-            handler();
-            return;
-          }
-        }
-      } else {
-        // No shortcut manager configured: fall back to the original hardcoded combos.
-        if (event.ctrlKey && event.shiftKey) {
-          this._openMaterialWiki(node);
-          return;
-        }
-        if (event.shiftKey) {
-          this._selectMaterialAsProduct(node);
-          return;
-        }
-        if (event.ctrlKey) {
-          this._selectMaterialAsReagent(node);
-          return;
-        }
-      }
-    }
-
-    // Regular click → highlight
-    this._highlightConnections(node, allNodes, linkArray);
+  // Action id -> handler(node). An action missing here (or whose handler returns false because
+  // it is unavailable) behaves as if it were unbound.
+  _actionHandler(actionId) {
+    return {
+      selectAsReagent: (node) => this._selectMaterialAsReagent(node),
+      selectAsProduct: (node) => this._selectMaterialAsProduct(node),
+      openMaterialWiki: (node) => this._openMaterialWiki(node),
+      addReagentToNewSet: (node) => this.onQuickAddSet && this.onQuickAddSet(node.id, "reagent"),
+      addProductToNewSet: (node) => this.onQuickAddSet && this.onQuickAddSet(node.id, "product"),
+      openTagMenu: (node, event) => this._showTagContextMenu(event, node),
+      toggleTagMaterials: (node) => this.state.toggleTagVisibility(node.id),
+    }[actionId];
   }
 
-  _handleNodeContextMenu(event, node) {
-    if (node.type !== "tag" || !this.shortcutManager) return; // let the browser's native menu show
-    if (!this.shortcutManager.matchesEvent("openTagMenu", event)) return; // rebound elsewhere
+  // Single entry point for click and contextmenu on a node. The node type is the shortcut scope.
+  _handleNodeEvent(event, node, allNodes, linkArray) {
+    const actionId = this.shortcutManager.resolve(node.type, event);
+    const handler = actionId && this._actionHandler(actionId);
 
-    event.preventDefault();
+    if (event.type === "contextmenu") {
+      if (!handler) return; // nothing bound: keep the browser's native menu
+      event.preventDefault();
+      event.stopPropagation();
+      handler(node, event);
+      return;
+    }
+
     event.stopPropagation();
-    this._showTagContextMenu(event, node);
+    this._cancelPendingClick();
+
+    if (!handler) {
+      // A plain click (or an unbound combo) highlights. Skip the second click of a double-click
+      // so it doesn't toggle the highlight back off.
+      if (event.detail < 2) this._highlightConnections(node, allNodes, linkArray);
+      return;
+    }
+
+    // A double-click with the same modifiers is bound too: wait before running this one.
+    if (event.detail < 2 && this.shortcutManager.hasDoubleClickVariant(node.type, event)) {
+      const { clientX, clientY } = event;
+      this._pendingClick = setTimeout(() => {
+        this._pendingClick = null;
+        handler(node, { clientX, clientY });
+      }, GraphRenderer.DOUBLE_CLICK_DELAY);
+      return;
+    }
+
+    handler(node, event);
+  }
+
+  _cancelPendingClick() {
+    clearTimeout(this._pendingClick);
+    this._pendingClick = null;
   }
 
   _openMaterialWiki(node) {
@@ -792,17 +817,23 @@ export class GraphRenderer {
     addItem("Show all materials", () => this.state.showTagMaterials(node.id));
     addItem("Hide all materials", () => this.state.hideTagMaterials(node.id));
 
-    document.body.appendChild(menu);
+    UIHelper.overlayHost().appendChild(menu);
     this._activeContextMenu = menu;
 
-    // Deferred so the click/contextmenu event that opened the menu doesn't immediately close it.
+    // Close on a press outside the menu, or on Escape. Listening to "pointerdown" rather than
+    // "click" matters: on Linux the contextmenu event fires on mouse *down*, and some browsers
+    // then dispatch a "click" to the document on release, which used to close the menu the very
+    // moment it opened. The press that opened the menu has already happened, so no deferral is
+    // needed; capture phase so nodes stopping propagation (d3 drag) can't swallow it.
     this._contextMenuOutsideHandler = (e) => {
-      if (!menu.contains(e.target)) this._closeContextMenu();
+      const close = e.type === "keydown" ? e.key === "Escape" : e.type === "fullscreenchange" || !menu.contains(e.target);
+      if (close) this._closeContextMenu();
     };
-    setTimeout(() => {
-      document.addEventListener("click", this._contextMenuOutsideHandler);
-      document.addEventListener("contextmenu", this._contextMenuOutsideHandler);
-    }, 0);
+    document.addEventListener("pointerdown", this._contextMenuOutsideHandler, true);
+    document.addEventListener("keydown", this._contextMenuOutsideHandler, true);
+    // Entering/leaving fullscreen changes which subtree is rendered: the menu would be stranded.
+    document.addEventListener("fullscreenchange", this._contextMenuOutsideHandler);
+    menu.addEventListener("contextmenu", (e) => e.preventDefault());
   }
 
   _closeContextMenu() {
@@ -811,14 +842,16 @@ export class GraphRenderer {
       this._activeContextMenu = null;
     }
     if (this._contextMenuOutsideHandler) {
-      document.removeEventListener("click", this._contextMenuOutsideHandler);
-      document.removeEventListener("contextmenu", this._contextMenuOutsideHandler);
+      document.removeEventListener("pointerdown", this._contextMenuOutsideHandler, true);
+      document.removeEventListener("keydown", this._contextMenuOutsideHandler, true);
+      document.removeEventListener("fullscreenchange", this._contextMenuOutsideHandler);
       this._contextMenuOutsideHandler = null;
     }
   }
 
   _highlightConnections(node, allNodes, linkArray) {
     this._resetHighlighting(allNodes);
+    this._highlight = { node, allNodes, linkArray };
 
     if (node.type === "material" || node.type === "tag") {
       allNodes
@@ -964,6 +997,7 @@ export class GraphRenderer {
   }
 
   _resetHighlighting(allNodes) {
+    this._highlight = null;
     allNodes.style("opacity", CONFIG.graph.opacities.default);
 
     d3.selectAll(".link-group").style("opacity", (d) => {

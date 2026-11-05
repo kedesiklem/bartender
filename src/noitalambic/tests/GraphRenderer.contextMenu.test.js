@@ -103,13 +103,23 @@ test("clicking outside the menu closes it without changing anything", async () =
   fireEvent(tagEl, "contextmenu");
   assert.ok(document.querySelector('[role="menu"]'));
 
-  // The outside-click listener is attached on a deferred timer to avoid closing on the very
-  // event that opened it.
+  // A click reaching the document on release (Firefox/Linux open the menu on mouse down) must
+  // not close it; only a new press outside does.
   await new Promise((resolve) => setTimeout(resolve, 0));
   document.body.dispatchEvent(new window.Event("click", { bubbles: true }));
+  assert.ok(document.querySelector('[role="menu"]'), "release click must not close the menu");
+
+  document.body.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
 
   assert.equal(document.querySelector('[role="menu"]'), null);
   assert.equal(state.visibleTagMaterials.has("water"), false);
+});
+
+test("Escape closes the menu", async () => {
+  await setupDom();
+  fireEvent(findTagNodeGroup(), "contextmenu");
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(document.querySelector('[role="menu"]'), null);
 });
 
 test("right-clicking a material node does not open the tag menu (browser default is left alone)", async () => {
@@ -121,4 +131,21 @@ test("right-clicking a material node does not open the tag menu (browser default
 
   assert.equal(document.querySelector('[role="menu"]'), null);
   assert.equal(event.defaultPrevented, false, "the native context menu must not be suppressed for materials");
+});
+
+test("in fullscreen the menu is attached inside the fullscreen element (otherwise it is not rendered)", async () => {
+  await setupDom();
+  const fullscreenHost = document.body.appendChild(document.createElement("div"));
+  Object.defineProperty(document, "fullscreenElement", { value: fullscreenHost, configurable: true });
+  try {
+    fireEvent(findTagNodeGroup(), "contextmenu");
+    const menu = document.querySelector('[role="menu"]');
+    assert.ok(menu);
+    assert.equal(menu.parentElement, fullscreenHost);
+
+    document.dispatchEvent(new window.Event("fullscreenchange"));
+    assert.equal(document.querySelector('[role="menu"]'), null, "leaving fullscreen closes the menu");
+  } finally {
+    delete document.fullscreenElement;
+  }
 });

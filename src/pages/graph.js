@@ -11,7 +11,7 @@ import {DataRepository} from '../noitalambic/core/DataRepository.js';
 import {AppState} from '../noitalambic/core/AppState.js';
 import {ReactionSetWorkspace} from '../noitalambic/core/ReactionSetWorkspace.js';
 import {ReactionGroupResolver} from '../noitalambic/core/ReactionGroupResolver.js';
-import {ShortcutManager} from '../noitalambic/core/ShortcutManager.js';
+import {getSharedShortcutManager} from '../noitalambic/core/ShortcutManager.js';
 import {ReactionFilter} from '../noitalambic/filters/ReactionFilter.js';
 import {GraphDataBuilder} from '../noitalambic/graph/GraphDataBuilder.js';
 import {GraphRenderer} from '../noitalambic/graph/GraphRenderer.js';
@@ -137,7 +137,7 @@ async function mountMode({datasets, settings, container, mode, switchMode}) {
   const {ui, renderer} = view;
   const share = createShareButton(view.url, Controls);
   const reset = createResetButton(Controls, () => {view.reset(); share.clear();});
-  const unused = ui.createUnusedMaterialsToggle(Controls), download = ui.createExportButton(Controls, {html});
+  const unused = ui.createUnusedMaterialsToggle(Controls), download = ui.createExportButton();
   modeControl.addEventListener('change', () => switchMode(modeControl.value, view.switchUrl(modeControl.value)));
   settings.replaceChildren(html`<section class="card"><div class="card-body">
       ${modeControl}
@@ -157,7 +157,7 @@ async function mountMode({datasets, settings, container, mode, switchMode}) {
       view.restore();
     },
     dispose() {
-      share.dispose(); renderer.currentCleanup?.(); view.dispose();
+      share.dispose(); renderer.currentCleanup?.(); renderer.dispose(); view.dispose();
       settings.replaceChildren(); container.replaceChildren();
       document.getElementById('reactionsCount').textContent = 'Reactions';
       document.getElementById('graph-legend')?.remove();
@@ -205,7 +205,7 @@ function createAdvancedMode({bus, repo, state, filter, builder}) {
   // Reaction sets: several reagent/product selections, combined through a tree of groups
   // (union / intersection / difference / symmetric difference) with per-set advanced filters.
   const workspace = new ReactionSetWorkspace(bus), resolver = new ReactionGroupResolver(filter);
-  const shortcuts = new ShortcutManager();
+  const shortcuts = getSharedShortcutManager();
   const renderer = new GraphRenderer(repo, state, builder, shortcuts, (id, role) => quickAddMaterialToNewSet(id, role));
   const ui = new UIController(state, filter, renderer, repo, workspace);
   const url = () => {
@@ -215,7 +215,7 @@ function createAdvancedMode({bus, repo, state, filter, builder}) {
     return url.toString();
   };
   const panel = new ReactionSetPanel({workspace, resolver, reactionFilter: filter, dataRepo: repo, eventBus: bus,
-    ChoicesLib: Choices, shortcutManager: shortcuts, hideable: false,
+    ChoicesLib: Choices, hideable: false,
     onSetsResolved: result => {ui.updateUIFromResolvedSets(result); history.replaceState(history.state, '', url());}});
   ui.reactionSetPanel = panel;
   function quickAddMaterialToNewSet(materialId, role) {
@@ -236,7 +236,7 @@ function createAdvancedMode({bus, repo, state, filter, builder}) {
     workspace.seedFromLegacyParams({reagents: state.selectedReagents, product: state.selectedProduct, minSpeed: state.minReactionSpeed});
   };
   const panelHost = html`<div id="reactionSetPanel"></div>`;
-  // Graph quick picks (Ctrl/Shift+Click) change the global selection: mirror them onto the first
+  // Graph quick picks (set as reagent/product shortcuts) change the global selection: mirror them onto the first
   // set. Excluding unused materials changes the reactions themselves, so the sets are resolved
   // again. Anything else (e.g. tag visibility) only needs a repaint of the last result.
   const pick = () => JSON.stringify([state.selectedReagents, state.selectedProduct]);

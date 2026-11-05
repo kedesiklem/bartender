@@ -10,6 +10,8 @@
     "predev": "node scripts/validate-material-availability.mjs && node scripts/prepare-data.mjs && node scripts/prepare-icons.mjs",
     "pretest": "node scripts/validate-material-availability.mjs && node scripts/prepare-data.mjs && node scripts/prepare-icons.mjs",
     "materials:check": "node scripts/validate-material-availability.mjs",
+    "images:sync": "node scripts/sync-material-images.mjs",
+    "images:check": "node scripts/sync-material-images.mjs --check",
     "preview": "vite preview",
     "data:prepare": "node scripts/prepare-data.mjs",
     "data:refresh": "node scripts/refresh-data.mjs",

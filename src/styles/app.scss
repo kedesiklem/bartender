@@ -68,7 +68,9 @@
   .navbar-nav :is(.alpha-mark, .beta-mark) { font-size: .75em; line-height: 0; vertical-align: baseline; margin-inline-start: 0; }
   .action-control { display: inline-flex; align-items: end; }
   .action-control .bi { font-size: 1.1em; }
-  .action-control:has(> :disabled), .form-field:has(> :disabled), .form-field:has(> .choices.is-disabled),
+  .action-control .export-format-toggle { flex: 0 0 auto; padding-inline: .5rem; }
+  .action-control .export-format-toggle .bi { font-size: .85em; }
+  .action-control:has(> :disabled), .action-control:has(> .btn-group > :disabled), .form-field:has(> :disabled), .form-field:has(> .choices.is-disabled),
   .form-range:has(> .form-range-input:disabled), [data-disabled-hint-active] { cursor: not-allowed; }
   [data-disabled-hint-active] :is(:disabled, label, .choices.is-disabled) { pointer-events: none; cursor: inherit; }
   .form-range:has(> .form-range-input:disabled) { --range-track-cursor: not-allowed; }

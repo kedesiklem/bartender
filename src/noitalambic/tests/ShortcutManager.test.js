@@ -1,95 +1,206 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { ShortcutManager } from "../core/ShortcutManager.js";
+import { ShortcutManager, parseCombo, normalizeCombo, comboFromEvent, formatCombo } from "../core/ShortcutManager.js";
 import { InMemoryStorage } from "../core/ReactionSetManager.js";
 
-function buildManager() {
-  return new ShortcutManager(new InMemoryStorage());
-}
+const build = (storage = new InMemoryStorage()) => new ShortcutManager(storage);
+const ev = (type, { ctrlKey = false, shiftKey = false, altKey = false, detail = 1 } = {}) => ({ type, ctrlKey, shiftKey, altKey, detail });
 
-test("default bindings cover every legacy and new interaction", () => {
-  const manager = buildManager();
-  assert.deepEqual(manager.getBinding("selectAsReagent"), { trigger: "click", ctrl: true, shift: false, alt: false });
-  assert.deepEqual(manager.getBinding("selectAsProduct"), { trigger: "click", ctrl: false, shift: true, alt: false });
-  assert.deepEqual(manager.getBinding("openMaterialWiki"), { trigger: "click", ctrl: true, shift: true, alt: false });
-  assert.deepEqual(manager.getBinding("addReagentToNewSet"), { trigger: "click", ctrl: false, shift: false, alt: true });
-  assert.deepEqual(manager.getBinding("addProductToNewSet"), { trigger: "click", ctrl: false, shift: true, alt: true });
-  assert.deepEqual(manager.getBinding("openTagMenu"), { trigger: "contextmenu", ctrl: false, shift: false, alt: false });
+// ---------------------------------------------------------------------------
+// Combo strings
+// ---------------------------------------------------------------------------
+
+test("combos are normalized to a fixed modifier order whatever the input order/casing", () => {
+  assert.equal(normalizeCombo("alt+ctrl+click"), "Ctrl+Alt+Click");
+  assert.equal(normalizeCombo("Shift+Ctrl+RightClick"), "Ctrl+Shift+RightClick");
+  assert.equal(normalizeCombo("DoubleClick"), "DoubleClick");
 });
 
-test("matchesEvent distinguishes click from contextmenu even with identical modifiers", () => {
-  const manager = buildManager();
-  const clickEvent = { type: "click", detail: 1, ctrlKey: false, shiftKey: false, altKey: false };
-  const contextEvent = { type: "contextmenu", ctrlKey: false, shiftKey: false, altKey: false };
-
-  assert.equal(manager.matchesEvent("openTagMenu", clickEvent), false);
-  assert.equal(manager.matchesEvent("openTagMenu", contextEvent), true);
+test("invalid combos are rejected", () => {
+  assert.equal(parseCombo("Ctrl+Ctrl+Click"), null);
+  assert.equal(parseCombo("Meta+Click"), null);
+  assert.equal(parseCombo("Ctrl"), null);
+  assert.equal(parseCombo(""), null);
+  assert.equal(parseCombo(null), null);
 });
 
-test("matchesEvent for a 'click' trigger does not match the first click of a double-click", () => {
-  const manager = buildManager();
-  manager.setBinding("selectAsReagent", { trigger: "click", ctrl: false, shift: false, alt: false });
-
-  assert.equal(manager.matchesEvent("selectAsReagent", { type: "click", detail: 1, ctrlKey: false, shiftKey: false, altKey: false }), true);
-  assert.equal(manager.matchesEvent("selectAsReagent", { type: "click", detail: 2, ctrlKey: false, shiftKey: false, altKey: false }), false);
+test("comboFromEvent maps click / second click / contextmenu to the three gestures", () => {
+  assert.equal(comboFromEvent(ev("click", { ctrlKey: true })), "Ctrl+Click");
+  assert.equal(comboFromEvent(ev("click", { detail: 2, altKey: true })), "Alt+DoubleClick");
+  assert.equal(comboFromEvent(ev("contextmenu", { shiftKey: true })), "Shift+RightClick");
+  assert.equal(comboFromEvent(ev("keydown")), null);
 });
 
-test("matchesEvent for a 'dblclick' trigger only matches detail === 2", () => {
-  const manager = buildManager();
-  manager.setBinding("openTagMenu", { trigger: "dblclick", ctrl: false, shift: false, alt: false });
-
-  assert.equal(manager.matchesEvent("openTagMenu", { type: "click", detail: 2, ctrlKey: false, shiftKey: false, altKey: false }), true);
-  assert.equal(manager.matchesEvent("openTagMenu", { type: "click", detail: 1, ctrlKey: false, shiftKey: false, altKey: false }), false);
+test("formatCombo produces readable labels", () => {
+  assert.equal(formatCombo("Ctrl+Shift+Click"), "Ctrl+Shift+Click");
+  assert.equal(formatCombo("DoubleClick"), "Double-click");
+  assert.equal(formatCombo("Alt+RightClick"), "Alt+Right-click");
+  assert.equal(formatCombo(null), "Unassigned");
 });
 
-test("setBinding refuses a combo already used by another action", () => {
-  const manager = buildManager();
-  const result = manager.setBinding("addReagentToNewSet", { trigger: "click", ctrl: true, shift: false, alt: false });
+// ---------------------------------------------------------------------------
+// Defaults and resolution
+// ---------------------------------------------------------------------------
+
+test("default bindings", () => {
+  const m = build();
+  assert.equal(m.getBinding("selectAsReagent"), "Ctrl+Click");
+  assert.equal(m.getBinding("selectAsProduct"), "Shift+Click");
+  assert.equal(m.getBinding("openMaterialWiki"), "Ctrl+Shift+Click");
+  assert.equal(m.getBinding("addReagentToNewSet"), "Alt+Click");
+  assert.equal(m.getBinding("addProductToNewSet"), "Shift+Alt+Click");
+  assert.equal(m.getBinding("toggleTagMaterials"), "DoubleClick");
+  assert.equal(m.getBinding("openTagMenu"), "RightClick");
+});
+
+test("resolve is scoped by node type", () => {
+  const m = build();
+  assert.equal(m.resolve("material", ev("click", { ctrlKey: true })), "selectAsReagent");
+  assert.equal(m.resolve("tag", ev("click", { ctrlKey: true })), null);
+  assert.equal(m.resolve("tag", ev("contextmenu")), "openTagMenu");
+  assert.equal(m.resolve("material", ev("contextmenu")), null);
+  assert.equal(m.resolve("reaction", ev("click", { ctrlKey: true })), null);
+});
+
+test("a single-click binding does not match the second click of a double-click", () => {
+  const m = build();
+  assert.equal(m.resolve("material", ev("click", { ctrlKey: true, detail: 2 })), null);
+});
+
+test("the same gesture can be bound in two scopes at once", () => {
+  const m = build();
+  const result = m.setBinding("openMaterialWiki", "RightClick");
+  assert.deepEqual(result, { ok: true, swappedWith: null });
+  assert.equal(m.resolve("material", ev("contextmenu")), "openMaterialWiki");
+  assert.equal(m.resolve("tag", ev("contextmenu")), "openTagMenu");
+});
+
+// ---------------------------------------------------------------------------
+// Rebinding
+// ---------------------------------------------------------------------------
+
+test("binding a gesture already used in the same scope swaps the two actions", () => {
+  const m = build();
+  const result = m.setBinding("addReagentToNewSet", "Ctrl+Click");
+  assert.deepEqual(result, { ok: true, swappedWith: "selectAsReagent" });
+  assert.equal(m.getBinding("addReagentToNewSet"), "Ctrl+Click");
+  assert.equal(m.getBinding("selectAsReagent"), "Alt+Click");
+});
+
+test("plain click is reserved for highlighting", () => {
+  const m = build();
+  const result = m.setBinding("openTagMenu", "Click");
   assert.equal(result.ok, false);
-  assert.match(result.error, /reagent/i);
-  assert.deepEqual(manager.getBinding("addReagentToNewSet"), { trigger: "click", ctrl: false, shift: false, alt: true });
+  assert.equal(m.getBinding("openTagMenu"), "RightClick");
 });
 
-test("setBinding accepts a free combo, including changing the trigger, and persists it", () => {
-  const manager = buildManager();
-  const result = manager.setBinding("openTagMenu", { trigger: "dblclick", ctrl: false, shift: false, alt: false });
-  assert.equal(result.ok, true);
-  assert.deepEqual(manager.getBinding("openTagMenu"), { trigger: "dblclick", ctrl: false, shift: false, alt: false });
+test("unknown actions and invalid combos are rejected without changes", () => {
+  const m = build();
+  assert.equal(m.setBinding("nope", "Ctrl+Click").ok, false);
+  assert.equal(m.setBinding("openTagMenu", "TripleClick").ok, false);
+  assert.equal(m.getBinding("openTagMenu"), "RightClick");
 });
 
-test("setBinding rejects an unknown trigger", () => {
-  const manager = buildManager();
-  const result = manager.setBinding("openTagMenu", { trigger: "tripleclick", ctrl: false, shift: false, alt: false });
-  assert.equal(result.ok, false);
+test("clearBinding unassigns an action so its gesture resolves to nothing", () => {
+  const m = build();
+  m.clearBinding("selectAsReagent");
+  assert.equal(m.getBinding("selectAsReagent"), null);
+  assert.equal(m.resolve("material", ev("click", { ctrlKey: true })), null);
 });
 
-test("bindings persist across instances sharing the same storage", () => {
+test("swapping with an unassigned action leaves the other one unassigned", () => {
+  const m = build();
+  m.clearBinding("addReagentToNewSet");
+  const result = m.setBinding("addReagentToNewSet", "Ctrl+Click");
+  assert.equal(result.swappedWith, "selectAsReagent");
+  assert.equal(m.getBinding("selectAsReagent"), null);
+});
+
+test("resetBinding restores one default, swapping with its current holder", () => {
+  const m = build();
+  m.setBinding("selectAsReagent", "Alt+Click"); // swaps with addReagentToNewSet
+  m.resetBinding("addReagentToNewSet");
+  assert.equal(m.getBinding("addReagentToNewSet"), "Alt+Click");
+  assert.equal(m.getBinding("selectAsReagent"), "Ctrl+Click");
+});
+
+test("resetToDefaults restores every binding", () => {
+  const m = build();
+  m.setBinding("openTagMenu", "DoubleClick");
+  m.clearBinding("selectAsReagent");
+  m.resetToDefaults();
+  assert.equal(m.getBinding("openTagMenu"), "RightClick");
+  assert.equal(m.getBinding("selectAsReagent"), "Ctrl+Click");
+  assert.ok(m.getActions().every((a) => m.isDefault(a.id)));
+});
+
+test("subscribers are notified on every change and can unsubscribe", () => {
+  const m = build();
+  let calls = 0;
+  const unsubscribe = m.subscribe(() => calls++);
+  m.setBinding("openTagMenu", "DoubleClick");
+  m.clearBinding("openTagMenu");
+  m.resetToDefaults();
+  assert.equal(calls, 3);
+  unsubscribe();
+  m.setBinding("openTagMenu", "DoubleClick");
+  assert.equal(calls, 3);
+});
+
+test("hasDoubleClickVariant tells whether a single click must wait for a possible double-click", () => {
+  const m = build();
+  assert.equal(m.hasDoubleClickVariant("material", ev("click", { ctrlKey: true })), false);
+  m.setBinding("openMaterialWiki", "Ctrl+DoubleClick");
+  assert.equal(m.hasDoubleClickVariant("material", ev("click", { ctrlKey: true })), true);
+  assert.equal(m.hasDoubleClickVariant("tag", ev("click", { ctrlKey: true })), false);
+});
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+test("only overrides are persisted, and they survive a reload", () => {
   const storage = new InMemoryStorage();
-  const manager1 = new ShortcutManager(storage);
-  manager1.setBinding("openTagMenu", { trigger: "dblclick", ctrl: false, shift: false, alt: false });
+  const m1 = build(storage);
+  m1.setBinding("addReagentToNewSet", "Ctrl+Click");
+  m1.clearBinding("openTagMenu");
 
-  const manager2 = new ShortcutManager(storage);
-  assert.deepEqual(manager2.getBinding("openTagMenu"), { trigger: "dblclick", ctrl: false, shift: false, alt: false });
+  assert.deepEqual(JSON.parse(storage.getItem("noitalambic.shortcuts.v2")), {
+    selectAsReagent: "Alt+Click",
+    addReagentToNewSet: "Ctrl+Click",
+    openTagMenu: null,
+  });
+
+  const m2 = build(storage);
+  assert.equal(m2.getBinding("addReagentToNewSet"), "Ctrl+Click");
+  assert.equal(m2.getBinding("selectAsReagent"), "Alt+Click");
+  assert.equal(m2.getBinding("openTagMenu"), null);
 });
 
-test("resetToDefaults restores every original binding", () => {
-  const manager = buildManager();
-  manager.setBinding("openTagMenu", { trigger: "dblclick", ctrl: false, shift: false, alt: false });
-  manager.resetToDefaults();
-  assert.deepEqual(manager.getBinding("openTagMenu"), { trigger: "contextmenu", ctrl: false, shift: false, alt: false });
-});
-
-test("formatCombo produces a readable label for every trigger type", () => {
-  assert.equal(ShortcutManager.formatCombo({ trigger: "click", ctrl: true, shift: false, alt: false }), "Ctrl+Click");
-  assert.equal(ShortcutManager.formatCombo({ trigger: "dblclick", ctrl: false, shift: false, alt: false }), "Double-click");
-  assert.equal(ShortcutManager.formatCombo({ trigger: "contextmenu", ctrl: false, shift: false, alt: false }), "Right-click");
-});
-
-test("loading an older saved binding without a trigger field defaults it to 'click'", () => {
+test("corrupted or conflicting stored data never yields two actions on one gesture", () => {
   const storage = new InMemoryStorage();
-  storage.setItem("noitalambic.shortcuts", JSON.stringify({ addReagentToNewSet: { ctrl: true, shift: false, alt: true } }));
+  storage.setItem("noitalambic.shortcuts.v2", JSON.stringify({ addReagentToNewSet: "Ctrl+Click", openTagMenu: "Click", nope: "Alt+Click", selectAsProduct: 42 }));
+  const m = build(storage);
+  assert.equal(m.getBinding("addReagentToNewSet"), "Ctrl+Click");
+  assert.equal(m.getBinding("selectAsReagent"), "Alt+Click");
+  assert.equal(m.getBinding("openTagMenu"), "RightClick");
+  assert.equal(m.getBinding("selectAsProduct"), "Shift+Click");
 
-  const manager = new ShortcutManager(storage);
-  assert.deepEqual(manager.getBinding("addReagentToNewSet"), { trigger: "click", ctrl: true, shift: false, alt: true });
+  storage.setItem("noitalambic.shortcuts.v2", "{not json");
+  assert.equal(build(storage).getBinding("openTagMenu"), "RightClick");
+});
+
+test("bindings saved in the previous format are migrated", () => {
+  const storage = new InMemoryStorage();
+  storage.setItem(
+    "noitalambic.shortcuts",
+    JSON.stringify({
+      openTagMenu: { trigger: "dblclick", ctrl: false, shift: false, alt: false },
+      addReagentToNewSet: { ctrl: true, shift: false, alt: true }, // pre-trigger format
+    }),
+  );
+  const m = build(storage);
+  assert.equal(m.getBinding("openTagMenu"), "DoubleClick");
+  assert.equal(m.getBinding("addReagentToNewSet"), "Ctrl+Alt+Click");
 });
