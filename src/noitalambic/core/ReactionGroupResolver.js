@@ -23,9 +23,19 @@ export class ReactionGroupResolver {
 
   // Resolves any node in the workspace's tree (defaults to the root, i.e. the full result).
   // Resolving an arbitrary sub-node is used by the panel to show a live count per group.
+  // The full result (root) leaves out the workspace's excluded reactions: eval(root) \ excluded.
+  // A sub-node's result (the panel's per-group counts) is that group alone, before exclusion.
   resolve(workspace, nodeId = workspace.tree.rootId) {
     const node = workspace.tree.getNode(nodeId);
     const map = this._resolveNode(node, workspace);
+    let excludedCount = 0;
+    if (nodeId === workspace.tree.rootId && workspace.excluded?.size) {
+      map.forEach((entry, index) => {
+        if (!workspace.isExcluded(entry.reaction)) return;
+        map.delete(index);
+        excludedCount++;
+      });
+    }
     const entries = [...map.values()].sort((a, b) => b.reaction.reactionRate - a.reaction.reactionRate);
 
     const perSetCounts = {};
@@ -33,7 +43,7 @@ export class ReactionGroupResolver {
       perSetCounts[set.id] = this.reactionFilter.getFilteredReactionsAdvanced(this._criteriaFor(set)).length;
     });
 
-    return { entries, perSetCounts, totalCount: entries.length };
+    return { entries, perSetCounts, totalCount: entries.length, excludedCount };
   }
 
   _criteriaFor(set) {

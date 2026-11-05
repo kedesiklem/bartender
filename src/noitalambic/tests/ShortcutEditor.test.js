@@ -34,7 +34,7 @@ test("lists every action grouped by node type with its current shortcut", async 
   assert.equal(recordBtn("openTagMenu").textContent, "Right-click");
   assert.deepEqual(
     [...document.querySelectorAll(".shortcut-editor-scope")].map((el) => el.textContent),
-    ["Material", "Tag"],
+    ["Material", "Tag", "Reaction"],
   );
 });
 

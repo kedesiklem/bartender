@@ -318,26 +318,35 @@ test("a rasterization failure is reported, nothing is downloaded", async () => {
   assert.equal(getDownloadName(), null);
 });
 
-test("split button: main part exports SVG, the arrow is part of the same button group and opens the other formats", async () => {
+test("split button: main part exports SVG, then its copy button, then the arrow opening the other formats", async () => {
   const { ui } = await setup(`<g></g>`);
   ui._loadMenu = async () => {};
   const exported = [];
+  const copied = [];
   ui.exportGraph = async (format) => exported.push(format);
+  ui.copyGraph = async (format) => copied.push(format);
 
   const control = ui.createExportButton();
   const group = control.querySelector(".btn-group");
-  const [main, toggle, menu] = group.children;
+  const [main, copy, toggle, menu] = group.children;
+  assert.equal(copy.dataset.copyFormat, "svg");
+  assert.match(copy.getAttribute("aria-label"), /clipboard/i);
   assert.equal(main.dataset.exportFormat, "svg");
   assert.match(main.textContent, /Export SVG/);
   assert.equal(toggle.getAttribute("data-bs-toggle"), "menu");
   assert.ok(menu.classList.contains("menu"), "menu right after the arrow (Bootstrap split button markup)");
-  assert.deepEqual([...menu.querySelectorAll(".menu-item")].map((item) => item.dataset.exportFormat), ["png", "jpeg"]);
+  assert.deepEqual([...menu.querySelectorAll("[data-export-format]")].map((item) => item.dataset.exportFormat), ["png", "jpeg"]);
+  assert.deepEqual([...menu.querySelectorAll("[data-copy-format]")].map((item) => item.dataset.copyFormat), ["png", "jpeg"], "each format row has its copy button");
 
   main.click();
   menu.querySelector('[data-export-format="png"]').click();
   menu.querySelector('[data-export-format="jpeg"]').click();
   toggle.click();
   assert.deepEqual(exported, ["svg", "png", "jpeg"], "the arrow itself exports nothing");
+  copy.click();
+  menu.querySelector('[data-copy-format="png"]').click();
+  menu.querySelector('[data-copy-format="jpeg"]').click();
+  assert.deepEqual(copied, ["svg", "png", "jpeg"]);
 });
 
 test("both parts of the split button are disabled while there is no graph", async () => {
@@ -350,7 +359,7 @@ test("both parts of the split button are disabled while there is no graph", asyn
 
   document.getElementById("graphContainer").innerHTML = "";
   ui.updateExportButton();
-  assert.equal(buttons().length, 2);
+  assert.equal(buttons().length, 3, "export, copy, arrow");
   assert.ok(buttons().every((b) => b.disabled));
 });
 
@@ -365,4 +374,91 @@ test("Bootstrap's menu styles are compiled in, otherwise the export menu is alwa
   const { readFileSync } = await import("node:fs");
   const scss = readFileSync(new URL("../../styles/_bootstrap.scss", import.meta.url), "utf8");
   assert.match(scss, /^@forward "bootstrap\/scss\/menu";$/m);
+});
+
+// ---------------------------------------------------------------------------
+// Copy to the clipboard
+// ---------------------------------------------------------------------------
+
+// A clipboard that records what is written; ClipboardItem resolves its promised blobs.
+function fakeClipboard(dom, { supported = ["image/png", "text/plain"], fail = false } = {}) {
+  const written = [];
+  global.ClipboardItem = class {
+    constructor(items) { this.items = items; }
+    static supports(type) { return supported.includes(type); }
+  };
+  Object.defineProperty(dom.window.navigator, "clipboard", {
+    configurable: true,
+    value: {
+      async write(items) {
+        if (fail) throw new Error("denied");
+        for (const item of items) {
+          const entry = {};
+          for (const [type, value] of Object.entries(item.items)) entry[type] = await value;
+          written.push(entry);
+        }
+      },
+    },
+  });
+  return written;
+}
+
+test("copy SVG: the standalone SVG source goes to the clipboard as text, and as an SVG image where supported", async () => {
+  const { dom, ui, notifications } = await setup(`<g><circle fill="red" r="10"></circle></g>`);
+  const written = fakeClipboard(dom, { supported: ["image/png", "text/plain", "image/svg+xml"] });
+  await ui.copyGraph("svg");
+  assert.equal(written.length, 1);
+  assert.match(await written[0]["text/plain"].text(), /^<\?xml[\s\S]*<svg/);
+  assert.match(await written[0]["image/svg+xml"].text(), /<svg/);
+  assert.equal(notifications.at(-1), "Graph copied to the clipboard as SVG");
+
+  const plain = fakeClipboard(dom); // no SVG image support: text only
+  await ui.copyGraph("svg");
+  assert.deepEqual(Object.keys(plain[0]), ["text/plain"]);
+});
+
+test("copy PNG: the rendered PNG goes to the clipboard; nothing is downloaded", async () => {
+  const { dom, ui, notifications, getDownloadName } = await setup(`<g><circle r="10"></circle></g>`);
+  const written = fakeClipboard(dom);
+  const png = new Blob(["png"], { type: "image/png" });
+  ui._rasterize = async (text, options) => {
+    assert.equal(options.mime, "image/png");
+    return png;
+  };
+  await ui.copyGraph("png");
+  assert.equal(written[0]["image/png"], png);
+  assert.equal(getDownloadName(), null);
+  assert.equal(notifications.at(-1), "Graph copied to the clipboard as PNG");
+});
+
+test("copy JPEG: clipboards hold no JPEG, so the same opaque picture goes as PNG, and the user is told", async () => {
+  const { dom, ui, notifications } = await setup(`<g></g>`, { containerStyle: "background-color: rgb(1, 2, 3)" });
+  const written = fakeClipboard(dom);
+  let options = null;
+  ui._rasterize = async (text, o) => {
+    options = o;
+    return new Blob(["png"], { type: "image/png" });
+  };
+  await ui.copyGraph("jpeg");
+  assert.equal(options.mime, "image/png");
+  assert.equal(options.background, "rgb(1, 2, 3)", "still painted on the page background, like the JPEG");
+  assert.deepEqual(Object.keys(written[0]), ["image/png"]);
+  assert.match(notifications.at(-1), /as an image \(PNG: clipboards can't hold JPEG\)/);
+});
+
+test("copy failures and missing clipboard support are reported, never thrown", async () => {
+  const { dom, ui, notifications } = await setup(`<g></g>`);
+  fakeClipboard(dom, { fail: true });
+  await ui.copyGraph("svg");
+  assert.equal(notifications.at(-1), "Copying the graph as SVG failed");
+
+  delete global.ClipboardItem;
+  await ui.copyGraph("png");
+  assert.equal(notifications.at(-1), "Copying images isn't available in this browser");
+
+  fakeClipboard(dom);
+  document.getElementById("graphContainer").innerHTML = "";
+  await ui.copyGraph("png");
+  assert.equal(notifications.at(-1), "No graph to copy");
+  delete global.ClipboardItem;
 });

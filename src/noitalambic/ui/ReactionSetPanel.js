@@ -18,6 +18,7 @@
 
 import { ChoicesInitializer } from "./ChoicesInitializer.js";
 import { UIHelper } from "./UIHelper.js";
+import { iconMarkup } from "../../ui/icons.js";
 import { downloadBlob } from "./download.js";
 import { GROUP_MODES } from "../core/ReactionGroupTree.js";
 
@@ -39,6 +40,19 @@ function escapeHtml(str = "") {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 }
+
+// Compact square button showing only an icon; the label goes to the tooltip and screen readers.
+function iconButton(action, iconName, label, { extraClass = "", attrs = "" } = {}) {
+  return `<button type="button" class="rsp-icon-btn ${extraClass}" data-action="${action}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" ${attrs}>${iconMarkup(iconName)}</button>`;
+}
+
+// Button with an icon and a short visible label (title = longer explanation).
+function labeledButton(action, iconName, label, title, { extraClass = "", attrs = "" } = {}) {
+  return `<button type="button" class="rsp-labeled-btn ${extraClass}" data-action="${action}" title="${escapeHtml(title)}" ${attrs}>${iconMarkup(iconName)}<span>${escapeHtml(label)}</span></button>`;
+}
+
+const dragHandle = () =>
+  `<span class="rsp-drag-handle" data-role="drag-handle" title="Drag to reorder or move into another group" aria-label="Drag to reorder">${iconMarkup("grip-vertical")}</span>`;
 
 export class ReactionSetPanel {
   static _stylesInjected = false;
@@ -152,6 +166,7 @@ export class ReactionSetPanel {
     this.container.innerHTML = this._renderShell();
     this._bindGlobalControls();
     this._bindNode(this.workspace.tree.root);
+    this._bindTreeDropZone();
     this._recompute();
   }
 
@@ -178,30 +193,65 @@ export class ReactionSetPanel {
 
 
         <div class="rsp-bulk-actions">
-          <button type="button" data-action="collapse-all" title="Fold every set and group down to their header">Collapse all</button>
-          <button type="button" data-action="expand-all" title="Unfold every set and group">Expand all</button>
+          ${labeledButton("collapse-all", "arrows-collapse", "Collapse all", "Fold every set and group down to their header")}
+          ${labeledButton("expand-all", "arrows-expand", "Expand all", "Unfold every set and group")}
         </div>
 
         <div id="reactionSetTree">
           ${this._renderNode(this.workspace.tree.root)}
         </div>
 
+        ${this._renderExcluded()}
+
         <div class="rsp-summary" id="rsp-summary">No reactions yet</div>
 
-        <div class="rsp-config-actions">
-          <button type="button" data-action="save-config" title="Save the current sets and groups under a name">Save</button>
-          <select data-role="saved-configs" title="Saved configurations"></select>
-          <button type="button" data-action="load-config" title="Load the selected configuration">Load</button>
-          <button type="button" data-action="delete-config" title="Delete the selected configuration">Delete</button>
-          <button type="button" data-action="download-config" title="Download the current configuration as a JSON file">Download</button>
-          <label class="rsp-file-label" title="Import a configuration from a JSON file">
-            Import
-            <input type="file" accept="application/json" data-role="import-file" hidden />
-          </label>
-          <button type="button" data-action="export-csv" title="Export the current reaction list as CSV">Export CSV</button>
-          <button type="button" data-action="reset-all" title="Remove everything and start over">Reset all</button>
-        </div>
+        <section class="rsp-configs" aria-label="Configurations">
+          <div class="rsp-configs-title">Configurations</div>
+          <div class="rsp-configs-row">
+            <select data-role="saved-configs" title="Saved configurations" aria-label="Saved configurations"></select>
+            ${iconButton("load-config", "folder2-open", "Load the selected configuration")}
+            ${iconButton("delete-config", "trash3", "Delete the selected configuration", { extraClass: "rsp-danger" })}
+          </div>
+          <div class="rsp-configs-toolbar">
+            ${labeledButton("save-config", "floppy", "Save as…", "Save the current sets and groups under a name")}
+            <label class="rsp-labeled-btn rsp-file-label" title="Import a configuration from a JSON file">
+              ${iconMarkup("upload")}<span>Import</span>
+              <input type="file" accept="application/json" data-role="import-file" hidden />
+            </label>
+            ${labeledButton("download-config", "download", "Download", "Download the current configuration as a JSON file")}
+            ${labeledButton("export-csv", "filetype-csv", "CSV", "Export the current reaction list as CSV")}
+            ${labeledButton("reset-all", "arrow-counterclockwise", "Reset", "Remove every set and group and start over", { extraClass: "rsp-danger rsp-push-end" })}
+          </div>
+        </section>
       </div>
+    `;
+  }
+
+  // Reactions excluded from the result (right-click a reaction in the graph), each restorable.
+  // Listed from their saved snapshot, so even one the current reaction source lacks shows up.
+  _renderExcluded() {
+    const excluded = [...this.workspace.excluded.entries()];
+    if (!excluded.length) return "";
+    const items = excluded
+      .map(([key, reaction]) => `
+        <li class="rsp-excluded-item">
+          <span class="rsp-excluded-name">${escapeHtml(UIHelper.reactionTitle(reaction, this.dataRepo))}</span>
+          <span class="rsp-group-count">speed ${escapeHtml(String(reaction.reactionRate ?? "?"))}</span>
+          ${iconButton("restore-reaction", "arrow-counterclockwise", "Restore: put this reaction back in the result", { attrs: `data-key="${escapeHtml(key)}"` })}
+        </li>`)
+      .join("");
+    // Laid out like a group card (header: name, count, actions), each reaction like a set row.
+    return `
+      <details class="rsp-group rsp-excluded" open>
+        <summary class="rsp-group-header">
+          <span class="rsp-group-name">Excluded reactions</span>
+          <span class="rsp-group-count">${excluded.length} ${excluded.length > 1 ? "reactions" : "reaction"}</span>
+          <span class="rsp-group-actions">
+            ${labeledButton("restore-all-reactions", "arrow-counterclockwise", "Restore all", "Put every excluded reaction back in the result")}
+          </span>
+        </summary>
+        <ul class="rsp-excluded-list">${items}</ul>
+      </details>
     `;
   }
 
@@ -228,8 +278,8 @@ export class ReactionSetPanel {
     return `
       <div class="rsp-group ${isRoot ? "rsp-group-root" : ""}" data-group-id="${group.id}">
         <div class="rsp-group-header">
-          ${isRoot ? "" : `<span class="rsp-drag-handle" data-role="drag-handle" title="Drag to reorder or move into another group">Move</span>`}
-          <button type="button" class="rsp-collapse-btn" data-action="toggle-collapse" title="${group.collapsed ? "Expand" : "Collapse"}">${group.collapsed ? "+" : "-"}</button>
+          ${isRoot ? "" : dragHandle()}
+          ${iconButton("toggle-collapse", group.collapsed ? "chevron-right" : "chevron-down", group.collapsed ? "Expand" : "Collapse", { extraClass: "rsp-collapse-btn" })}
           ${isRoot ? "" : `<input type="checkbox" data-role="group-enabled" ${group.enabled !== false ? "checked" : ""} title="Enable/disable this group" />`}
           <select data-role="group-mode" title="How the children of this group combine">${modeOptions}</select>
           ${
@@ -239,13 +289,13 @@ export class ReactionSetPanel {
           }
           <span class="rsp-group-count" data-role="group-count">0 reactions</span>
           <div class="rsp-group-actions">
-            ${isRoot ? `<button type="button" data-action="add-set" title="Add a new set to this group">+ Set</button><button type="button" data-action="add-group" title="Add a nested sub-group here">+ Group</button>` : ""}
+            ${isRoot ? `${labeledButton("add-set", "plus-lg", "Set", "Add a new set to this group")}${labeledButton("add-group", "folder-plus", "Group", "Add a nested sub-group here")}` : ""}
             ${
               isRoot
                 ? ""
-                : `${this._keyboardAccessible ? `<button type="button" data-action="move-up" title="Move up">Move up</button><button type="button" data-action="move-down" title="Move down">Move down</button>` : ""}
-                   <button type="button" data-action="ungroup" title="Remove this grouping, keep its contents">Ungroup</button>
-                   <button type="button" data-action="delete-group" title="Delete this group and everything inside it">delete</button>`
+                : `${this._keyboardAccessible ? `${iconButton("move-up", "arrow-up", "Move up")}${iconButton("move-down", "arrow-down", "Move down")}` : ""}
+                   ${iconButton("ungroup", "folder-minus", "Ungroup (keep its contents)")}
+                   ${iconButton("delete-group", "trash3", "Delete this group and everything inside it", { extraClass: "rsp-danger" })}`
             }
           </div>
         </div>
@@ -322,16 +372,16 @@ export class ReactionSetPanel {
     return `
       <div class="rsp-set-card" data-set-id="${set.id}" style="--set-color:${set.color}">
         <div class="rsp-set-card-header">
-          <span class="rsp-drag-handle" data-role="drag-handle" title="Drag to reorder or move into another group">Move</span>
-          <button type="button" class="rsp-collapse-btn" data-action="toggle-set-collapse" title="${set.collapsed ? "Expand" : "Collapse"}">${set.collapsed ? "+" : "-"}</button>
+          ${dragHandle()}
+          ${iconButton("toggle-set-collapse", set.collapsed ? "chevron-right" : "chevron-down", set.collapsed ? "Expand" : "Collapse", { extraClass: "rsp-collapse-btn" })}
           <input type="checkbox" data-role="enabled" ${set.enabled ? "checked" : ""} title="Enable/disable this set" />
           <input type="color" data-role="color" value="${set.color}" title="Set color" />
           <input type="text" data-role="name" value="${escapeHtml(set.name)}" class="rsp-set-name" title="Set name" />
           <span class="rsp-set-count" data-role="count">0 reactions</span>
           <div class="rsp-set-card-actions">
-            ${this._keyboardAccessible ? `<button type="button" data-action="move-up" title="Move up">Move up</button><button type="button" data-action="move-down" title="Move down">Move down</button>` : ""}
-            <button type="button" data-action="duplicate" title="Duplicate this set">copy</button>
-            <button type="button" data-action="delete" title="Delete this set">delete</button>
+            ${this._keyboardAccessible ? `${iconButton("move-up", "arrow-up", "Move up")}${iconButton("move-down", "arrow-down", "Move down")}` : ""}
+            ${iconButton("duplicate", "copy", "Duplicate this set")}
+            ${iconButton("delete", "trash3", "Delete this set", { extraClass: "rsp-danger" })}
           </div>
         </div>
         ${bodyHtml}
@@ -348,6 +398,18 @@ export class ReactionSetPanel {
 
     this.container.querySelector('[data-role="keyboard-accessible"]').addEventListener("change", () => {
       this._toggleKeyboardAccessible();
+    });
+
+    this.container.querySelectorAll('[data-action="restore-reaction"]').forEach((button) => {
+      button.addEventListener("click", () => {
+        this.workspace.restoreReaction(button.dataset.key);
+        this._rebuild();
+      });
+    });
+    this.container.querySelector('[data-action="restore-all-reactions"]')?.addEventListener("click", (event) => {
+      event.preventDefault(); // it sits in the section's <summary>: don't also fold it
+      this.workspace.restoreAllReactions();
+      this._rebuild();
     });
 
     this.container.querySelector('[data-action="collapse-all"]').addEventListener("click", () => {
@@ -381,7 +443,7 @@ export class ReactionSetPanel {
     this.container.querySelector('[data-action="delete-config"]').addEventListener("click", () => {
       const select = this.container.querySelector('[data-role="saved-configs"]');
       const name = select.value;
-      if (name) {
+      if (name && window.confirm(`Delete the saved configuration "${name}"?`)) {
         this.workspace.deleteNamedConfig(name);
         this._refreshSavedConfigsSelect();
       }
@@ -420,6 +482,7 @@ export class ReactionSetPanel {
     });
 
     this.container.querySelector('[data-action="reset-all"]').addEventListener("click", () => {
+      if (!window.confirm("Remove every set, group and excluded reaction and start over?")) return;
       this.workspace.reset(true);
       this._rebuild();
     });
@@ -430,9 +493,17 @@ export class ReactionSetPanel {
     if (!select) return;
 
     const configs = this.workspace.listSavedConfigs();
+    const date = (iso) => {
+      const d = new Date(iso);
+      return Number.isNaN(d.getTime()) ? "" : ` · ${d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}`;
+    };
     select.innerHTML = configs.length
-      ? configs.map((c) => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join("")
+      ? configs.map((c) => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}${escapeHtml(date(c.savedAt))}</option>`).join("")
       : `<option value="">No saved configurations</option>`;
+    // Nothing to load or delete without a saved configuration.
+    this.container.querySelectorAll('[data-action="load-config"], [data-action="delete-config"]').forEach((button) => {
+      button.disabled = configs.length === 0;
+    });
   }
 
   _downloadConfig() {
@@ -537,16 +608,6 @@ export class ReactionSetPanel {
       this._makeDraggable(headerEl.querySelector('[data-role="drag-handle"]'), group.id);
     }
 
-    // Any group (including root) is a drop target: dropping directly into its children area
-    // (not onto a specific sibling card) appends the dragged node at the end of this group.
-    const childrenEl = cardEl.querySelector(":scope > .rsp-group-children");
-    if (childrenEl) this._makeContainerDropTarget(childrenEl, group.id);
-
-    // The header is also a sibling-relative drop target (before/after), plus a middle "into
-    // this group" zone - the only way to drop into a collapsed or currently empty group, since
-    // there is no children area rendered/reachable in that case.
-    this._makeSiblingDropTarget(headerEl, group.id, { supportsInto: true });
-
     // + Set / + Group only exist on the root: create there, then drag into any nested group -
     // repeating them on every group just adds clutter now that drag and drop covers moving
     // things around.
@@ -583,8 +644,6 @@ export class ReactionSetPanel {
     }
 
     this._makeDraggable(cardEl.querySelector('[data-role="drag-handle"]'), set.id);
-    const setHeaderEl = cardEl.querySelector(":scope > .rsp-set-card-header");
-    this._makeSiblingDropTarget(setHeaderEl, set.id, { supportsInto: false });
 
     const enabledCheckbox = cardEl.querySelector('[data-role="enabled"]');
     enabledCheckbox.addEventListener("change", () => {
@@ -753,15 +812,35 @@ export class ReactionSetPanel {
   // target, with a minimum height and an empty-state hint so an empty group is never a zero-size,
   // impossible-to-hit drop zone.
 
+  // -------------------------------------------------------------------
+  // Drag and drop (sets and groups, by their grip handle)
+  // -------------------------------------------------------------------
+  // One delegated set of listeners on the tree (see _bindTreeDropZone) works out, from the
+  // pointer position, where the dragged node would land - {parentId, index} - and shows a single
+  // indicator: an insertion line in the gap it would fill, or a dashed frame around the group it
+  // would go into. Invalid places (a group into itself or its own descendants, around the root)
+  // and no-op places (where it already is) show nothing and accept no drop.
+
   _makeDraggable(handleEl, nodeId) {
     if (!handleEl) return;
     handleEl.setAttribute("draggable", "true");
 
     handleEl.addEventListener("dragstart", (event) => {
       this._draggedNodeId = nodeId;
-      event.dataTransfer?.setData("text/plain", nodeId);
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-      handleEl.closest(".rsp-set-card, .rsp-group")?.classList.add("rsp-dragging");
+      const cardEl = handleEl.closest(".rsp-set-card, .rsp-group");
+      if (event.dataTransfer) {
+        event.dataTransfer.setData("text/plain", nodeId);
+        event.dataTransfer.effectAllowed = "move";
+        // Drag the whole card, not just the small grip.
+        if (cardEl && typeof event.dataTransfer.setDragImage === "function") {
+          const rect = cardEl.getBoundingClientRect();
+          event.dataTransfer.setDragImage(cardEl, event.clientX - rect.left, event.clientY - rect.top);
+        }
+      }
+      // After the drag image snapshot: dim the card left behind.
+      const dim = () => cardEl?.classList.add("rsp-dragging");
+      if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(dim);
+      else dim();
     });
 
     handleEl.addEventListener("dragend", () => {
@@ -771,105 +850,126 @@ export class ReactionSetPanel {
     });
   }
 
-  // headerEl: the element used both to hit-test the pointer position and to show the drop
-  // indicator. targetNodeId: the set or group this header belongs to. supportsInto: whether a
-  // middle-zone drop should be interpreted as "move into this node" (only meaningful for groups).
-  _makeSiblingDropTarget(headerEl, targetNodeId, { supportsInto = false } = {}) {
-    headerEl.addEventListener("dragover", (event) => {
-      if (!this._draggedNodeId || this._draggedNodeId === targetNodeId) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const zone = this._getDropZone(headerEl, event.clientY, supportsInto);
-      this._clearDropIndicators();
-      headerEl.classList.add(`rsp-drop-${zone}`);
-    });
+  _bindTreeDropZone() {
+    const treeEl = this.container.querySelector("#reactionSetTree");
+    if (!treeEl) return;
 
-    headerEl.addEventListener("dragleave", () => {
-      headerEl.classList.remove("rsp-drop-before", "rsp-drop-after", "rsp-drop-into");
-    });
-
-    headerEl.addEventListener("drop", (event) => {
-      if (!this._draggedNodeId || this._draggedNodeId === targetNodeId) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const zone = this._getDropZone(headerEl, event.clientY, supportsInto);
-      const draggedId = this._draggedNodeId;
-      this._draggedNodeId = null;
-      this._clearDropIndicators();
-      if (zone === "into") {
-        this._performDropIntoGroup(draggedId, targetNodeId);
-      } else {
-        this._performSiblingDrop(draggedId, targetNodeId, zone);
+    treeEl.addEventListener("dragover", (event) => {
+      if (!this._draggedNodeId) return;
+      const target = this._dropTargetAt(event.target, event.clientY);
+      if (!target || target.noop) {
+        this._clearDropIndicators();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        return;
       }
+      event.preventDefault(); // accept the drop here
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      this._showDropIndicator(treeEl, target);
     });
-  }
 
-  _makeContainerDropTarget(containerEl, groupId) {
-    containerEl.addEventListener("dragover", (event) => {
+    treeEl.addEventListener("dragleave", (event) => {
+      if (!treeEl.contains(event.relatedTarget)) this._clearDropIndicators();
+    });
+
+    treeEl.addEventListener("drop", (event) => {
       if (!this._draggedNodeId) return;
-      event.preventDefault();
-      event.stopPropagation();
-      this._clearDropIndicators();
-      containerEl.classList.add("rsp-drop-into");
-    });
-
-    containerEl.addEventListener("dragleave", () => {
-      containerEl.classList.remove("rsp-drop-into");
-    });
-
-    containerEl.addEventListener("drop", (event) => {
-      if (!this._draggedNodeId) return;
-      event.preventDefault();
-      event.stopPropagation();
+      const target = this._dropTargetAt(event.target, event.clientY);
       const draggedId = this._draggedNodeId;
       this._draggedNodeId = null;
       this._clearDropIndicators();
-      this._performDropIntoGroup(draggedId, groupId);
+      if (!target || target.noop) return;
+      event.preventDefault();
+      this.workspace.tree.moveNode(draggedId, target.parentId, target.index);
+      this._rebuild();
     });
   }
 
-  // Splits el's own bounding box into before/after (2 zones) or before/into/after (3 zones,
-  // when supportsInto is true) based on where clientY falls.
-  _getDropZone(el, clientY, supportsInto) {
-    const rect = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
-    if (!rect || rect.height === 0) return supportsInto ? "into" : "before";
+  // Where the dragged node would land if dropped with the pointer over `el` at height clientY:
+  // {parentId, index, line: {el, edge} | null, intoEl | null, noop} or null when not allowed.
+  // index counts the parent's children without the dragged node (what tree.moveNode expects).
+  _dropTargetAt(el, clientY) {
+    const draggedId = this._draggedNodeId;
+    const tree = this.workspace.tree;
+    const hit = el?.closest?.(".rsp-set-card, .rsp-group");
+    if (!draggedId || !hit || !this.container.contains(hit)) return null;
 
-    const ratio = (clientY - rect.top) / rect.height;
-    if (!supportsInto) return ratio < 0.5 ? "before" : "after";
-    if (ratio < 0.25) return "before";
-    if (ratio > 0.75) return "after";
-    return "into";
+    const nodeIdOf = (cardEl) => cardEl.dataset.setId ?? cardEl.dataset.groupId;
+    const rect = (target) => target.getBoundingClientRect();
+
+    let place = null; // {relativeTo, edge} or {into, index | "end"}
+    const hitId = nodeIdOf(hit);
+    if (hit.classList.contains("rsp-set-card")) {
+      const r = rect(hit);
+      place = { relativeTo: hit, edge: clientY < r.top + r.height / 2 ? "before" : "after" };
+    } else {
+      const isRoot = hitId === tree.rootId;
+      const header = hit.querySelector(":scope > .rsp-group-header");
+      const headerRect = rect(header);
+      const groupRect = rect(hit);
+      if (clientY <= headerRect.bottom) {
+        // Top of a (non-root) group's header: before the group; the rest of it: into the group,
+        // first if it is open (it then shows right under the header), last if it is folded.
+        if (!isRoot && clientY < headerRect.top + headerRect.height * 0.3) place = { relativeTo: hit, edge: "before" };
+        else place = { into: hit, index: tree.getNode(hitId)?.collapsed ? "end" : 0 };
+      } else if (!isRoot && clientY > groupRect.bottom - 8) {
+        place = { relativeTo: hit, edge: "after" };
+      } else {
+        // Between the group's children: the gap closest to the pointer.
+        const children = [...(hit.querySelector(":scope > .rsp-group-children")?.children ?? [])]
+          .filter((child) => child.matches(".rsp-set-card, .rsp-group") && nodeIdOf(child) !== draggedId);
+        const next = children.find((child) => clientY < rect(child).top + rect(child).height / 2);
+        if (next) place = { relativeTo: next, edge: "before" };
+        else if (children.length) place = { relativeTo: children[children.length - 1], edge: "after" };
+        else place = { into: hit, index: 0 };
+      }
+    }
+
+    let parentId, index, line = null, intoEl = null;
+    if (place.into) {
+      parentId = nodeIdOf(place.into);
+      const siblings = (tree.getNode(parentId)?.children ?? []).filter((id) => id !== draggedId);
+      index = place.index === "end" ? siblings.length : place.index;
+      intoEl = place.into;
+      const first = place.into.querySelector(":scope > .rsp-group-children > .rsp-set-card, :scope > .rsp-group-children > .rsp-group");
+      if (index === 0 && first && nodeIdOf(first) !== draggedId) line = { el: first, edge: "before" };
+    } else {
+      const targetId = nodeIdOf(place.relativeTo);
+      if (targetId === draggedId) return null;
+      const targetNode = tree.getNode(targetId);
+      if (!targetNode?.parentId) return null; // the root has no siblings
+      parentId = targetNode.parentId;
+      const siblings = tree.getNode(parentId).children.filter((id) => id !== draggedId);
+      index = siblings.indexOf(targetId) + (place.edge === "after" ? 1 : 0);
+      line = { el: place.relativeTo, edge: place.edge };
+    }
+
+    // A group can't go into itself or anything nested in it.
+    if (tree._isSameOrDescendant(parentId, draggedId)) return null;
+    const dragged = tree.getNode(draggedId);
+    const currentIndex = tree.getNode(dragged?.parentId)?.children.indexOf(draggedId);
+    const noop = dragged?.parentId === parentId && currentIndex === index;
+    return { parentId, index, line, intoEl, noop };
   }
 
-  // Inserts draggedId as a sibling of targetNodeId (in targetNodeId's own parent), before or
-  // after it. Works whether draggedId already lives in that parent (pure reorder) or comes from
-  // elsewhere in the tree (reparent + position in one move).
-  _performSiblingDrop(draggedId, targetNodeId, position) {
-    if (draggedId === targetNodeId) return;
-    const targetNode = this.workspace.tree.getNode(targetNodeId);
-    if (!targetNode) return;
-    const parent = this.workspace.tree.getNode(targetNode.parentId);
-    if (!parent) return;
-
-    const siblingsWithoutDragged = parent.children.filter((id) => id !== draggedId);
-    let index = siblingsWithoutDragged.indexOf(targetNodeId);
-    if (index === -1) return;
-    if (position === "after") index += 1;
-
-    this.workspace.tree.moveNode(draggedId, parent.id, index);
-    this._rebuild();
-  }
-
-  _performDropIntoGroup(draggedId, groupId) {
-    if (draggedId === groupId) return;
-    this.workspace.tree.moveNode(draggedId, groupId);
-    this._rebuild();
+  // One indicator at a time: an insertion line over the gap, and/or a frame on the target group.
+  _showDropIndicator(treeEl, target) {
+    this._clearDropIndicators();
+    if (target.intoEl) target.intoEl.classList.add("rsp-drop-into");
+    if (!target.line) return;
+    const treeRect = treeEl.getBoundingClientRect();
+    const r = target.line.el.getBoundingClientRect();
+    const y = target.line.edge === "before" ? r.top - 4 : r.bottom + 2;
+    const line = document.createElement("div");
+    line.className = "rsp-drop-line";
+    line.style.top = `${y - treeRect.top + treeEl.scrollTop}px`;
+    line.style.left = `${r.left - treeRect.left}px`;
+    line.style.width = `${r.width}px`;
+    treeEl.appendChild(line);
   }
 
   _clearDropIndicators() {
-    this.container?.querySelectorAll(".rsp-drop-before, .rsp-drop-after, .rsp-drop-into").forEach((el) => {
-      el.classList.remove("rsp-drop-before", "rsp-drop-after", "rsp-drop-into");
-    });
+    this.container?.querySelectorAll(".rsp-drop-line").forEach((el) => el.remove());
+    this.container?.querySelectorAll(".rsp-drop-into").forEach((el) => el.classList.remove("rsp-drop-into"));
   }
 
   _destroyChoicesInstances() {
@@ -923,7 +1023,8 @@ export class ReactionSetPanel {
 
     const summaryEl = this.container.querySelector("#rsp-summary");
     if (summaryEl) {
-      summaryEl.textContent = `${result.totalCount} reactions shown in total`;
+      const excluded = result.excludedCount ? ` (${result.excludedCount} excluded)` : "";
+      summaryEl.textContent = `${result.totalCount} reactions shown in total${excluded}`;
     }
   }
 
@@ -962,6 +1063,37 @@ export class ReactionSetPanel {
 
       .reaction-set-panel input[type="checkbox"] {
         accent-color: var(--slate-400);
+      }
+
+      /* Every button of the panel (and the Import file label) looks like the site's outline
+         buttons (btn-outline theme-secondary): a visible border, a hover state and a focus ring,
+         so anything clickable reads as such. Rules below only set each one's size. */
+      .reaction-set-panel :is(button:not(.rsp-hidden-tab), .rsp-file-label) {
+        cursor: pointer;
+        color: var(--secondary-fg);
+        background: transparent;
+        border: 1px solid var(--secondary-border);
+        border-radius: var(--radius-3);
+        transition: color .15s ease-in-out, background-color .15s ease-in-out, border-color .15s ease-in-out;
+      }
+
+      .reaction-set-panel :is(button:not(.rsp-hidden-tab), .rsp-file-label):hover {
+        color: var(--secondary-fg-emphasis);
+        background: var(--secondary-bg-muted);
+        border-color: var(--secondary-fg);
+      }
+
+      .reaction-set-panel :is(button:not(.rsp-hidden-tab), .rsp-file-label):focus-visible,
+      .reaction-set-panel .rsp-file-label:focus-within {
+        outline: 2px solid var(--secondary-focus-ring, var(--secondary-fg));
+        outline-offset: 1px;
+      }
+
+      .reaction-set-panel button:disabled {
+        cursor: default;
+        opacity: .5;
+        background: transparent;
+        border-color: var(--secondary-border);
       }
 
       .rsp-hidden-tab {
@@ -1011,17 +1143,8 @@ export class ReactionSetPanel {
       }
 
       .rsp-btn {
-        cursor: pointer;
-        border: 1px solid var(--border-color);
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border-radius: var(--radius-3);
         padding: 6px 10px;
         font-size: 12px;
-      }
-
-      .rsp-btn:hover {
-        background: var(--bg-3);
       }
 
       .rsp-bulk-actions {
@@ -1029,39 +1152,62 @@ export class ReactionSetPanel {
         gap: 6px;
       }
 
-      .rsp-bulk-actions button {
-        cursor: pointer;
-        border: 1px solid var(--border-color);
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border-radius: var(--radius-3);
-        padding: 4px 8px;
-        font-size: 11px;
-      }
-
-      .rsp-collapse-btn {
-        cursor: pointer;
-        border: 1px solid var(--border-color);
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border-radius: var(--radius-3);
-        width: 22px;
-        height: 22px;
+      /* Icon-only button (row actions): a compact square, the label in its tooltip. */
+      .reaction-set-panel .rsp-icon-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        padding: 0;
         font-size: 13px;
         line-height: 1;
         flex-shrink: 0;
       }
 
+      /* Icon + short label (section actions). */
+      .reaction-set-panel .rsp-labeled-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 9px;
+        font-size: 11px;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+
+      .reaction-set-panel .rsp-labeled-btn svg {
+        font-size: 13px;
+        flex-shrink: 0;
+      }
+
+      /* Destructive actions (delete, reset) turn red on hover. */
+      .reaction-set-panel .rsp-danger:hover:not(:disabled) {
+        color: #ff8a8a;
+        border-color: #ff6b6b;
+        background: rgba(255, 107, 107, 0.12);
+      }
+
+      /* A <span> (drag source, not a button), styled like the panel's buttons. */
       .rsp-drag-handle {
         cursor: grab;
-        border: 1px solid var(--border-color);
-        background: var(--bg-body);
-        color: var(--fg-3);
+        color: var(--secondary-fg);
+        border: 1px solid var(--secondary-border);
         border-radius: var(--radius-3);
-        padding: 3px 6px;
-        font-size: 10px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 24px;
+        font-size: 13px;
         flex-shrink: 0;
         user-select: none;
+      }
+
+      .rsp-drag-handle:hover {
+        color: var(--secondary-fg-emphasis);
+        background: var(--secondary-bg-muted);
+        border-color: var(--secondary-fg);
       }
 
       .rsp-drag-handle:active {
@@ -1072,17 +1218,35 @@ export class ReactionSetPanel {
         opacity: 0.4;
       }
 
-      .rsp-drop-before {
-        box-shadow: inset 0 3px 0 0 #45b7d1;
+      #reactionSetTree {
+        position: relative; /* anchors the insertion line */
       }
 
-      .rsp-drop-after {
-        box-shadow: inset 0 -3px 0 0 #45b7d1;
+      /* Where a dragged set/group would land: a line in the gap, with a dot at its start... */
+      .rsp-drop-line {
+        position: absolute;
+        height: 2px;
+        background: #45b7d1;
+        border-radius: 1px;
+        pointer-events: none;
+        z-index: 2;
       }
 
+      .rsp-drop-line::before {
+        content: "";
+        position: absolute;
+        left: -4px;
+        top: -3px;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #45b7d1;
+      }
+
+      /* ...or the group it would go into. */
       .rsp-drop-into {
         outline: 2px dashed #45b7d1;
-        outline-offset: -2px;
+        outline-offset: 2px;
         background: rgba(69, 183, 209, 0.08);
       }
 
@@ -1133,12 +1297,8 @@ export class ReactionSetPanel {
         flex-wrap: wrap;
       }
 
-      .rsp-group-actions button {
-        cursor: pointer;
-        border: 1px solid var(--border-color);
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border-radius: var(--radius-3);
+      .rsp-group-actions button,
+      .rsp-excluded-item button {
         padding: 2px 6px;
         font-size: 11px;
       }
@@ -1212,11 +1372,6 @@ export class ReactionSetPanel {
       }
 
       .rsp-set-card-actions button {
-        cursor: pointer;
-        border: 1px solid var(--border-color);
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border-radius: var(--radius-3);
         padding: 2px 6px;
         font-size: 11px;
       }
@@ -1295,6 +1450,40 @@ export class ReactionSetPanel {
         margin-top: 2px;
       }
 
+      .rsp-excluded > summary {
+        cursor: pointer;
+      }
+
+      .rsp-excluded .rsp-group-actions {
+        margin-left: auto;
+      }
+
+      .rsp-excluded-list {
+        list-style: none;
+        margin: 8px 0 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .rsp-excluded-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-3);
+        padding: 4px 6px;
+        background: var(--bg-body);
+        font-size: 12px;
+      }
+
+      .rsp-excluded-name {
+        flex: 1;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
       .rsp-summary {
         font-size: 12px;
         color: var(--fg-1);
@@ -1303,33 +1492,45 @@ export class ReactionSetPanel {
         padding-top: 8px;
       }
 
-      .rsp-config-actions {
+      .rsp-configs {
         display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
+        flex-direction: column;
+        gap: 8px;
         border-top: 1px solid var(--border-color);
         padding-top: 10px;
       }
 
-      .rsp-config-actions button,
-      .rsp-file-label {
-        cursor: pointer;
-        border: 1px solid var(--border-color);
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border-radius: var(--radius-3);
-        padding: 6px 8px;
+      .rsp-configs-title {
         font-size: 11px;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        color: var(--fg-3);
       }
 
-      .rsp-config-actions select {
-        background: var(--bg-body);
-        color: var(--fg-body);
-        border: 1px solid var(--border-color);
-        border-radius: var(--radius-3);
-        padding: 6px;
-        font-size: 11px;
-        max-width: 140px;
+      .rsp-configs-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .rsp-configs-row select {
+        flex: 1;
+        min-width: 0;
+        height: 26px;
+        padding: 2px 6px;
+        font-size: 12px;
+      }
+
+      .rsp-configs-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .reaction-set-panel .rsp-push-end {
+        margin-left: auto;
       }
     `;
     document.head.appendChild(style);

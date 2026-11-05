@@ -97,6 +97,7 @@ export class LegendManager {
     return `
       <div class="col-12 lg:col-4">
         <h4 class="fs-6">INTERACTIONS</h4>
+        <p class="small fg-3 mb-2">Left-drag the background to select nodes (Shift adds), then drag one to move them all. Right-drag to pan, wheel to zoom. Click the background or press Escape to clear the selection.</p>
         <div data-role="shortcut-editor"></div>
       </div>
     `;

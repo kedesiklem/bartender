@@ -9,6 +9,7 @@
 import { CONFIG } from "../config/config.js";
 import { ReactionSetManager, InMemoryStorage, createReactionSet } from "./ReactionSetManager.js";
 import { ReactionGroupTree, GROUP_MODES } from "./ReactionGroupTree.js";
+import { reactionKey, reactionSnapshot } from "./reactionKey.js";
 
 export class ReactionSetWorkspace {
   constructor(eventBus, storage = null) {
@@ -16,6 +17,32 @@ export class ReactionSetWorkspace {
     this.storage = storage || (typeof window !== "undefined" && window.localStorage ? window.localStorage : new InMemoryStorage());
     this.manager = new ReactionSetManager(eventBus);
     this.tree = new ReactionGroupTree(eventBus);
+    // Reactions taken out of the final result, whatever the sets and groups say: the shown
+    // reactions are eval(root) \ excluded (see ReactionGroupResolver.resolve). key -> snapshot.
+    this.excluded = new Map();
+  }
+
+  // -------------------------------------------------------------------
+  // Excluded reactions
+  // -------------------------------------------------------------------
+
+  excludeReactions(reactions) {
+    reactions.forEach((reaction) => this.excluded.set(reactionKey(reaction), reactionSnapshot(reaction)));
+    this.eventBus.emit("reactionSetsChanged", this);
+  }
+
+  restoreReaction(key) {
+    if (this.excluded.delete(key)) this.eventBus.emit("reactionSetsChanged", this);
+  }
+
+  restoreAllReactions() {
+    if (!this.excluded.size) return;
+    this.excluded.clear();
+    this.eventBus.emit("reactionSetsChanged", this);
+  }
+
+  isExcluded(reaction) {
+    return this.excluded.has(reactionKey(reaction));
   }
 
   // -------------------------------------------------------------------
@@ -59,6 +86,7 @@ export class ReactionSetWorkspace {
   reset(withDefaultSet = true) {
     this.manager.sets = [];
     this.tree.reset();
+    this.excluded.clear();
     if (withDefaultSet) this.createSet(this.tree.rootId, { name: "Set 1" });
     this.eventBus.emit("reactionSetsChanged", this);
   }
@@ -92,17 +120,21 @@ export class ReactionSetWorkspace {
       version: 2,
       sets: this.manager.sets.map((s) => JSON.parse(JSON.stringify(s))),
       tree: this.tree.serialize(),
+      excluded: [...this.excluded.values()].map((snapshot) => ({ ...snapshot })),
     };
   }
 
   loadFromObject(data) {
     if (!data) return false;
+    // Optional (older configs have none); restored once the sets/tree themselves loaded fine.
+    const excluded = new Map((Array.isArray(data.excluded) ? data.excluded : []).map((r) => [reactionKey(r), reactionSnapshot(r)]));
 
     if (data.version === 2 && data.tree) {
       if (!Array.isArray(data.sets)) return false;
       this.manager.sets = data.sets.map((s) => createReactionSet({ ...s }));
       const ok = this.tree.loadFromObject(data.tree);
       if (!ok) return false;
+      this.excluded = excluded;
       this.eventBus.emit("reactionSetsChanged", this);
       return true;
     }
@@ -116,6 +148,7 @@ export class ReactionSetWorkspace {
         this.tree.root.mode = data.combineMode;
       }
       this.manager.sets.forEach((s) => this.tree.addLeaf(s.id, this.tree.rootId));
+      this.excluded = excluded;
       this.eventBus.emit("reactionSetsChanged", this);
       return true;
     }

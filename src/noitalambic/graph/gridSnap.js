@@ -10,17 +10,19 @@ import { CONFIG } from "../config/config.js";
 
 const STORAGE_KEY = "noitalambic.graph.snapGrid";
 const SCALE_STORAGE_KEY = "noitalambic.graph.snapGridScale";
+const ENABLED_STORAGE_KEY = "noitalambic.graph.snapGridEnabled";
 
 // Grid size, as a percentage of the configured spacing (CONFIG.graph.snapGrids): 100 = as configured.
 export const SNAP_SCALE = { min: 5, max: 100, step: 5, default: 100 };
 
-export const SNAP_GRID_IDS = ["off", ...Object.keys(CONFIG.graph.snapGrids)];
+// Grid kinds. Whether snapping is on at all is a separate switch (loadSnapEnabled).
+export const SNAP_GRID_IDS = Object.keys(CONFIG.graph.snapGrids);
 
 export function snapGridLabel(id) {
-  return id === "off" ? "Off" : CONFIG.graph.snapGrids[id]?.label ?? id;
+  return CONFIG.graph.snapGrids[id]?.label ?? id;
 }
 
-// null when snapping is off (or the id is unknown). scale is a percentage (SNAP_SCALE) applied to
+// null for an unknown id. scale is a percentage (SNAP_SCALE) applied to
 // both spacings, so the grid keeps its shape.
 export function getSnapGrid(id, scale = SNAP_SCALE.default) {
   const spec = CONFIG.graph.snapGrids[id];
@@ -146,8 +148,27 @@ export function loadSnapGridId(storage = defaultStorage()) {
   try {
     const id = storage?.getItem(STORAGE_KEY);
     if (id && SNAP_GRID_IDS.includes(id)) return id;
-  } catch {/* storage unavailable: fall back to off */}
-  return "off";
+  } catch {/* storage unavailable: fall back to the first grid */}
+  return SNAP_GRID_IDS[0];
+}
+
+// Off by default. Before the switch existed, the grid id itself said "off" or which grid was
+// on: a stored grid other than "off" means snapping was on.
+export function loadSnapEnabled(storage = defaultStorage()) {
+  try {
+    const enabled = storage?.getItem(ENABLED_STORAGE_KEY);
+    if (enabled != null) return enabled === "true";
+    const legacy = storage?.getItem(STORAGE_KEY);
+    return !!legacy && legacy !== "off" && SNAP_GRID_IDS.includes(legacy);
+  } catch {
+    return false;
+  }
+}
+
+export function saveSnapEnabled(enabled, storage = defaultStorage()) {
+  try {
+    storage?.setItem(ENABLED_STORAGE_KEY, String(!!enabled));
+  } catch {/* only loses the preference */}
 }
 
 export function saveSnapGridId(id, storage = defaultStorage()) {

@@ -29,9 +29,10 @@ export const ACTIONS = [
   { id: "openMaterialMenu", scope: "material", label: "Open actions menu", defaultCombo: "RightClick" },
   { id: "toggleTagMaterials", scope: "tag", label: "Show/hide all its materials", defaultCombo: "DoubleClick" },
   { id: "openTagMenu", scope: "tag", label: "Open actions menu", defaultCombo: "RightClick" },
+  { id: "openReactionMenu", scope: "reaction", label: "Open actions menu", defaultCombo: "RightClick" },
 ];
 
-export const SCOPE_LABELS = { material: "Material", tag: "Tag" };
+export const SCOPE_LABELS = { material: "Material", tag: "Tag", reaction: "Reaction" };
 
 const ACTIONS_BY_ID = new Map(ACTIONS.map((action) => [action.id, action]));
 const STORAGE_KEY = "noitalambic.shortcuts.v2";

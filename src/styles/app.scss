@@ -70,6 +70,11 @@
   .action-control .bi { font-size: 1.1em; }
   .action-control .export-format-toggle { flex: 0 0 auto; padding-inline: .5rem; }
   .action-control .export-format-toggle .bi { font-size: .85em; }
+  .action-control [data-copy-format].btn-outline { flex: 0 0 auto; padding-inline: .6rem; }
+  /* Export menu: "Export <format>" and, at the end of its row, its copy-to-clipboard button. */
+  .export-menu-row { display: flex; align-items: stretch; }
+  .export-menu-row > .menu-item:first-child { flex: 1; gap: .5rem; }
+  .export-menu-row > .export-copy { flex: 0 0 auto; inline-size: auto; padding-inline: .75rem; }
   .action-control:has(> :disabled), .action-control:has(> .btn-group > :disabled), .form-field:has(> :disabled), .form-field:has(> .choices.is-disabled),
   .form-range:has(> .form-range-input:disabled), [data-disabled-hint-active] { cursor: not-allowed; }
   [data-disabled-hint-active] :is(:disabled, label, .choices.is-disabled) { pointer-events: none; cursor: inherit; }

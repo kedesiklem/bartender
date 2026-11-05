@@ -94,6 +94,7 @@ test("grid snapping puts every node on its own lattice point, and turning it off
   CONFIG.graph.snapAnimationMs = 0;
 
   graphRenderer.setSnapGrid("hexagonal");
+  graphRenderer.setSnapEnabled(true);
   const grid = getSnapGrid("hexagonal");
   const nodes = simulation.nodes();
   const cells = new Set();
@@ -107,7 +108,7 @@ test("grid snapping puts every node on its own lattice point, and turning it off
   assert.equal(window.localStorage.getItem("noitalambic.graph.snapGrid"), "hexagonal");
   assert.notEqual(document.querySelector("canvas.snap-grid").style.display, "none", "the grid backdrop is shown");
 
-  graphRenderer.setSnapGrid("off");
+  graphRenderer.setSnapEnabled(false);
   assert.ok(nodes.every((node) => node.fx == null && node.fy == null));
   assert.equal(document.querySelector("canvas.snap-grid").style.display, "none");
   simulation.stop();
@@ -121,6 +122,7 @@ test("with a grid on, a layout change re-lays out and snaps back right away (no 
   simulation.stop();
   CONFIG.graph.snapAnimationMs = 0;
   graphRenderer.setSnapGrid("square");
+  graphRenderer.setSnapEnabled(true);
 
   graphRenderer.setForcePreset("spacious");
   const grid = getSnapGrid("square");
@@ -147,6 +149,7 @@ test("with a grid on, showing a tag's materials or loading another selection re-
   graphRenderer._simulation.stop();
   CONFIG.graph.snapAnimationMs = 0;
   graphRenderer.setSnapGrid("hexagonal");
+  graphRenderer.setSnapEnabled(true);
   const grid = getSnapGrid("hexagonal");
   const entries = reactionFilter.getFilteredReactionsAdvanced({ reagents: ["fire"] });
 
@@ -196,6 +199,7 @@ test("changing the grid size re-snaps every node onto the resized grid and persi
   graphRenderer._simulation.stop();
   CONFIG.graph.snapAnimationMs = 0;
   graphRenderer.setSnapGrid("square");
+  graphRenderer.setSnapEnabled(true);
 
   graphRenderer.setSnapScale(40);
   assertAllOnDistinctCells(graphRenderer._simulation.nodes(), getSnapGrid("square", 40));
@@ -216,6 +220,7 @@ test("on a grid, nodes land on it but stay free, and a grid force keeps them the
   CONFIG.graph.snapAnimationMs = 0;
   graphRenderer.setSnapScale(100);
   graphRenderer.setSnapGrid("square");
+  graphRenderer.setSnapEnabled(true);
 
   const grid = getSnapGrid("square");
   const nodes = simulation.nodes();
@@ -233,7 +238,7 @@ test("on a grid, nodes land on it but stay free, and a grid force keeps them the
   simulation.force("grid")(1);
   assert.ok(node.vx < 0, "pulled back toward its cell");
 
-  graphRenderer.setSnapGrid("off");
+  graphRenderer.setSnapEnabled(false);
   assert.equal(simulation.force("grid"), undefined, "no grid, no grid force");
   simulation.stop();
 });
@@ -245,6 +250,7 @@ test("pinning is explicit, from the node menu ('Pin position' / 'Unpin position'
   graphRenderer._simulation.stop();
   CONFIG.graph.snapAnimationMs = 0;
   graphRenderer.setSnapGrid("square");
+  graphRenderer.setSnapEnabled(true);
   const node = graphRenderer._simulation.nodes().find((n) => n.type === "material");
   const entry = (label) => graphRenderer._contextMenuEntries(node, null).find((e) => e.label === label);
   assert.ok(!entry("Unpin position"), "free nodes have nothing to unpin");
@@ -270,6 +276,7 @@ test("a pinned node is out of the physics' reach, and stays pinned through layou
   CONFIG.graph.snapAnimationMs = 0;
   graphRenderer.setSnapScale(100);
   graphRenderer.setSnapGrid("square");
+  graphRenderer.setSnapEnabled(true);
   const node = simulation.nodes().find((n) => n.type === "material");
   graphRenderer._contextMenuEntries(node, null).find((e) => e.label === "Pin position").run();
   const at = [node.fx, node.fy];
@@ -296,7 +303,7 @@ test("a pinned node is out of the physics' reach, and stays pinned through layou
 test("without a grid, a node can be pinned too", async () => {
   const { graphRenderer } = await setupDom();
   graphRenderer._simulation.stop();
-  graphRenderer.setSnapGrid("off");
+  graphRenderer.setSnapEnabled(false);
   const node = graphRenderer._simulation.nodes()[0];
   const [x, y] = [node.x, node.y];
   graphRenderer._contextMenuEntries(node, null).find((e) => e.label === "Pin position").run();
@@ -308,6 +315,7 @@ test("the grid backdrop is a canvas under the SVG, outside it (so never exported
   const { graphRenderer } = await setupDom();
   graphRenderer._simulation.stop();
   graphRenderer.setSnapGrid("hexagonal");
+  graphRenderer.setSnapEnabled(true);
   const canvas = document.querySelector("canvas.snap-grid");
   assert.ok(canvas);
   assert.equal(canvas.closest("svg"), null);
@@ -347,7 +355,7 @@ test("settling time 0: nothing simulates - nodes stay put (centered in view), re
   const { graphRenderer, state, reactionFilter } = await setupDom("balanced");
   graphRenderer._simulation.stop();
   CONFIG.graph.snapAnimationMs = 0;
-  graphRenderer.setSnapGrid("off");
+  graphRenderer.setSnapEnabled(false);
   graphRenderer.setSettleSeconds(0);
   assert.equal(window.localStorage.getItem("noitalambic.graph.settleSeconds"), "0");
 
@@ -374,12 +382,13 @@ test("settling time 0: nothing simulates - nodes stay put (centered in view), re
 
   // A grid still applies, straight from where nodes are.
   graphRenderer.setSnapGrid("square");
+  graphRenderer.setSnapEnabled(true);
   const grid = getSnapGrid("square");
   for (const node of graphRenderer._simulation.nodes()) {
     const cell = grid.nearest(node.x, node.y);
     assert.deepEqual([node.x, node.y], [cell.x, cell.y]);
   }
-  graphRenderer.setSnapGrid("off");
+  graphRenderer.setSnapEnabled(false);
   graphRenderer.setSettleSeconds(5);
   graphRenderer._simulation.stop();
 });

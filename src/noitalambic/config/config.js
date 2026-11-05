@@ -4,13 +4,20 @@
 
 export const CONFIG = {
   graph: {
+    // Colorblind-friendly as checked with the dataviz palette validator on the dark graph surface
+    // (CVD-simulated OKLab distance >= 8 for each pair that must be told apart): input green /
+    // output cyan 18.9 (input links are also dashed), reaction coral / tag orange 11.5. Two tweaks
+    // to the original palette, same hues: tag links pale orange (plain orange read like input
+    // green, 3.1 -> 9.6) and hidden-tag red deeper (shown green / hidden red, 3.5 -> 16.7; the eye
+    // icon doubles it).
     colors: {
       reactionNode: "#ff6b6b",
       materialNodeDefault: "#505050",
       materialNodeOutput: "#45b7d1",
       tagNode: "#ffa500",
+      tagAssociation: "#ffcf85",
       tagVisible: "#24c93a",
-      tagHidden: "#ff6b6b",
+      tagHidden: "#c43c3c",
       selectedHighlight: "#ffff00",
       directMaterialHighlight: "#00ffff",
       inputArrow: "#24c93a",
@@ -132,6 +139,7 @@ export const CONFIG = {
   // Configuration for the multi-selection "reaction set" feature.
   reactionSets: {
     // Default color palette assigned to new sets (cycled), used for the union rings on the graph.
+    // Adjacent colors pass the CVD validator (worst pair 10.9).
     defaultColors: ["#ff6b6b", "#45b7d1", "#ffd93d", "#6bcb77", "#c77dff", "#ff9f1c", "#f72585", "#4cc9f0"],
     // localStorage key used to persist named configurations (save/load feature).
     storageKey: "noitalambic.reactionSets.savedConfigs",

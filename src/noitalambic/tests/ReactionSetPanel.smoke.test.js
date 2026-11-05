@@ -298,154 +298,151 @@ test("toggling reagents recomputes and calls onSetsResolved with matching totals
 // -------------------------------------------------------------------
 // Drag and drop
 // -------------------------------------------------------------------
-// jsdom's DragEvent/DataTransfer support is too limited to reliably simulate a real native drag
-// sequence (dataTransfer is essentially unusable), but plain Event objects with a clientY
-// property and native preventDefault/stopPropagation are enough to exercise the ACTUAL dragover/
-// drop DOM listeners end to end (geometry -> zone -> tree mutation), not just the pure
-// _performSiblingDrop/_performDropIntoGroup helpers in isolation. Both layers are covered below.
+// jsdom has no layout and a barely usable DataTransfer, so rects are mocked and plain events with
+// a clientY are dispatched: that drives the real delegated dragover/drop listeners end to end
+// (pointer position -> target {parentId, index} -> indicator -> tree mutation).
 
-function mockRect(el, { top, height }) {
-  el.getBoundingClientRect = () => ({ top, height, bottom: top + height, left: 0, right: 100, width: 100 });
+function mockRect(el, top, height) {
+  el.getBoundingClientRect = () => ({ top, height, bottom: top + height, left: 0, right: 300, width: 300 });
 }
 
 function fireDrag(el, type, clientY) {
   const event = new window.Event(type, { bubbles: true, cancelable: true });
   event.clientY = clientY;
   el.dispatchEvent(event);
+  return event;
 }
 
-test("_getDropZone splits a 2-zone header into before/after halves", async () => {
-  const { panel } = await setupDom();
-  const el = { getBoundingClientRect: () => ({ top: 100, height: 40 }) };
-  assert.equal(panel._getDropZone(el, 110, false), "before");
-  assert.equal(panel._getDropZone(el, 130, false), "after");
+const card = (setId) => document.querySelector(`.rsp-set-card[data-set-id="${setId}"]`);
+const groupEl = (groupId) => document.querySelector(`.rsp-group[data-group-id="${groupId}"]`);
+const header = (groupId) => groupEl(groupId).querySelector(":scope > .rsp-group-header");
+
+// Root header 0-30, then root children laid out from y=40, each `height` tall, 10 apart.
+function layout(workspace, heights = {}) {
+  mockRect(document.querySelector("#reactionSetTree"), 0, 1000);
+  mockRect(header(workspace.tree.rootId), 0, 30);
+  mockRect(groupEl(workspace.tree.rootId), 0, 1000);
+  let y = 40;
+  const place = (id) => {
+    const el = card(id) ?? groupEl(id);
+    const h = heights[id] ?? 60;
+    mockRect(el, y, h);
+    if (el.classList.contains("rsp-group")) {
+      mockRect(header(id), y, 30);
+      let inner = y + 40;
+      (workspace.tree.getNode(id).collapsed ? [] : workspace.tree.getNode(id).children).forEach((childId) => {
+        const childEl = card(childId) ?? groupEl(childId);
+        mockRect(childEl, inner, 40);
+        if (childEl.classList.contains("rsp-group")) mockRect(header(childId), inner, 30);
+        inner += 50;
+      });
+    }
+    y += h + 10;
+  };
+  workspace.tree.root.children.forEach(place);
+}
+
+async function mountWith(build) {
+  const ctx = await setupDom();
+  ctx.panel.mount(document.getElementById("panel"));
+  const ids = build(ctx.workspace);
+  ctx.panel._rebuild();
+  layout(ctx.workspace, ids.heights);
+  return { ...ctx, ...ids };
+}
+
+test("sets and groups (not the root) have a drag handle", async () => {
+  const { workspace } = await mountWith((ws) => ({ group: ws.createGroup(ws.tree.rootId, "union", "G") }));
+  assert.equal(document.querySelector('.rsp-group-root > .rsp-group-header [data-role="drag-handle"]'), null);
+  assert.equal(card(workspace.manager.sets[0].id).querySelector('[data-role="drag-handle"]').getAttribute("draggable"), "true");
 });
 
-test("_getDropZone splits a 3-zone header into before/into/after quarters", async () => {
-  const { panel } = await setupDom();
-  const el = { getBoundingClientRect: () => ({ top: 0, height: 100 }) };
-  assert.equal(panel._getDropZone(el, 10, true), "before");
-  assert.equal(panel._getDropZone(el, 50, true), "into");
-  assert.equal(panel._getDropZone(el, 90, true), "after");
+test("anywhere on a set card: upper half drops before it, lower half after it (its body included)", async () => {
+  const { workspace, panel, a, b, c } = await mountWith((ws) => ({
+    a: ws.manager.sets[0].id, b: ws.createSet(ws.tree.rootId, { name: "B" }).id, c: ws.createSet(ws.tree.rootId, { name: "C" }).id,
+  }));
+  // a: 40-100, b: 110-170, c: 180-240. Drag c onto the upper half of a.
+  panel._draggedNodeId = c;
+  fireDrag(card(a), "dragover", 50);
+  fireDrag(card(a), "drop", 50);
+  assert.deepEqual(workspace.tree.root.children, [c, a, b]);
+
+  layout(workspace);
+  // Now c: 40-100, a: 110-170, b: 180-240. Drag c onto the lower half (body area) of b: after b.
+  panel._draggedNodeId = c;
+  fireDrag(card(b).querySelector(".rsp-set-card-body") ?? card(b), "drop", 225);
+  assert.deepEqual(workspace.tree.root.children, [a, b, c]);
 });
 
-test("only non-root headers expose a drag handle; the root does not", async () => {
-  const { workspace, panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
+test("a group's header: top part drops before the group, the rest into it; between children, at that gap", async () => {
+  const { workspace, panel, set1, group, inner1, inner2 } = await mountWith((ws) => {
+    const g = ws.createGroup(ws.tree.rootId, "union", "G");
+    return { set1: ws.manager.sets[0].id, group: g.id, inner1: ws.createSet(g.id, { name: "I1" }).id, inner2: ws.createSet(g.id, { name: "I2" }).id, heights: { [g.id]: 150 } };
+  });
+  // set1: 40-100; group: 110-260, header 110-140, inner1 150-190, inner2 200-240.
+  panel._draggedNodeId = set1;
+  fireDrag(header(group), "drop", 200 - 85); // y=115: top 30% of the header -> before the group
+  assert.deepEqual(workspace.tree.root.children, [set1, group], "already there: nothing moved");
 
-  const rootHandle = document.querySelector(".rsp-group-root > .rsp-group-header [data-role=\"drag-handle\"]");
-  assert.equal(rootHandle, null, "the root group must not be draggable");
+  layout(workspace, { [group]: 150 });
+  panel._draggedNodeId = set1;
+  fireDrag(header(group), "drop", 135); // rest of the header -> into the (open) group, first
+  assert.deepEqual(workspace.tree.getNode(group).children, [set1, inner1, inner2]);
 
-  const setHandle = document.querySelector(`.rsp-set-card[data-set-id="${workspace.manager.sets[0].id}"] [data-role="drag-handle"]`);
-  assert.ok(setHandle);
-  assert.equal(setHandle.getAttribute("draggable"), "true");
-});
-
-test("full DOM wiring: dropping on the middle of a group header moves the dragged set into that (empty) group", async () => {
-  const { workspace, panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-  const setA = workspace.manager.sets[0];
-  const group = workspace.createGroup(workspace.tree.rootId, "union", "G"); // empty group
+  workspace.tree.moveNode(set1, workspace.tree.rootId, 0);
   panel._rebuild();
-
-  panel._draggedNodeId = setA.id; // a real dragstart would set this; simulated here directly
-
-  const groupHeaderEl = document.querySelector(`.rsp-group[data-group-id="${group.id}"] > .rsp-group-header`);
-  mockRect(groupHeaderEl, { top: 0, height: 100 });
-
-  fireDrag(groupHeaderEl, "dragover", 50); // middle -> "into"
-  fireDrag(groupHeaderEl, "drop", 50);
-
-  assert.equal(workspace.tree.getNode(setA.id).parentId, group.id, "the set must have moved into the group");
-  assert.deepEqual(workspace.tree.getNode(group.id).children, [setA.id]);
+  layout(workspace, { [group]: 150 });
+  panel._draggedNodeId = set1;
+  fireDrag(groupEl(group), "drop", 195); // in the children area, between inner1 and inner2
+  assert.deepEqual(workspace.tree.getNode(group).children, [inner1, set1, inner2]);
 });
 
-test("full DOM wiring: dropping on the top of a group header inserts the dragged node before it, as a sibling", async () => {
-  const { workspace, panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-  const setA = workspace.manager.sets[0];
-  const group = workspace.createGroup(workspace.tree.rootId, "union", "G");
-  panel._rebuild();
-
-  assert.deepEqual(workspace.tree.root.children, [setA.id, group.id]);
-
-  panel._draggedNodeId = group.id;
-  const setHeaderEl = document.querySelector(`.rsp-set-card[data-set-id="${setA.id}"] > .rsp-set-card-header`);
-  mockRect(setHeaderEl, { top: 0, height: 40 });
-
-  fireDrag(setHeaderEl, "dragover", 5); // near the very top -> "before"
-  fireDrag(setHeaderEl, "drop", 5);
-
-  assert.deepEqual(workspace.tree.root.children, [group.id, setA.id]);
+test("a folded group's header takes the node in at the end", async () => {
+  const { workspace, panel, set1, group, inner } = await mountWith((ws) => {
+    const g = ws.createGroup(ws.tree.rootId, "union", "G");
+    const inner = ws.createSet(g.id, { name: "I" }).id;
+    ws.tree.setCollapsed(g.id, true);
+    return { set1: ws.manager.sets[0].id, group: g.id, inner };
+  });
+  panel._draggedNodeId = set1;
+  fireDrag(header(group), "drop", 130);
+  assert.deepEqual(workspace.tree.getNode(group).children, [inner, set1]);
 });
 
-test("full DOM wiring: dropping in a group's (non-empty) children container appends at the end", async () => {
-  const { workspace, panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-  const rootSet = workspace.manager.sets[0];
-  const group = workspace.createGroup(workspace.tree.rootId, "union", "G");
-  const groupSetA = workspace.createSet(group.id, { name: "A" });
-  panel._rebuild();
-
-  panel._draggedNodeId = rootSet.id;
-  const childrenEl = document.querySelector(`.rsp-group[data-group-id="${group.id}"] > .rsp-group-children`);
-  fireDrag(childrenEl, "dragover", 0);
-  fireDrag(childrenEl, "drop", 0);
-
-  assert.deepEqual(workspace.tree.getNode(group.id).children, [groupSetA.id, rootSet.id]);
+test("a group can't be dropped into itself or its own descendants: no indicator, no move", async () => {
+  const { workspace, panel, outer, nested, inner } = await mountWith((ws) => {
+    const outer = ws.createGroup(ws.tree.rootId, "union", "Outer");
+    const nested = ws.createGroup(outer.id, "union", "Nested");
+    return { outer: outer.id, nested: nested.id, inner: ws.createSet(nested.id, { name: "I" }).id, heights: { [outer.id]: 200 } };
+  });
+  const before = JSON.stringify(workspace.tree.serialize());
+  panel._draggedNodeId = outer;
+  const over = fireDrag(header(nested), "dragover", 165);
+  assert.equal(over.defaultPrevented, false, "the drop is refused");
+  assert.equal(document.querySelector(".rsp-drop-line, .rsp-drop-into"), null);
+  fireDrag(header(nested), "drop", 165);
+  assert.equal(JSON.stringify(workspace.tree.serialize()), before);
+  assert.ok(inner);
 });
 
-test("_performSiblingDrop reorders two sets within the same (root) group", async () => {
-  const { workspace, panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-  const setA = workspace.manager.sets[0];
-  const setB = workspace.createSet(workspace.tree.rootId, { name: "B" });
-  panel._rebuild();
+test("one indicator at a time, cleared on drop; dropping where a node already is rebuilds nothing", async () => {
+  const { workspace, panel, a, b } = await mountWith((ws) => ({ a: ws.manager.sets[0].id, b: ws.createSet(ws.tree.rootId, { name: "B" }).id }));
+  panel._draggedNodeId = b;
+  fireDrag(card(a), "dragover", 50);
+  assert.equal(document.querySelectorAll(".rsp-drop-line").length, 1, "an insertion line");
+  fireDrag(card(a), "dragover", 52);
+  assert.equal(document.querySelectorAll(".rsp-drop-line").length, 1, "still only one");
 
-  assert.deepEqual(workspace.tree.root.children, [setA.id, setB.id]);
-
-  panel._performSiblingDrop(setB.id, setA.id, "before");
-
-  assert.deepEqual(workspace.tree.root.children, [setB.id, setA.id]);
-});
-
-test("_performSiblingDrop reparents a set into a different group, at the right position", async () => {
-  const { workspace, panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-  const rootSet = workspace.manager.sets[0];
-
-  const group = workspace.createGroup(workspace.tree.rootId, "union", "G");
-  const groupSetA = workspace.createSet(group.id, { name: "A" });
-  panel._rebuild();
-
-  panel._performSiblingDrop(rootSet.id, groupSetA.id, "after");
-
-  assert.equal(workspace.tree.getNode(rootSet.id).parentId, group.id);
-  assert.deepEqual(workspace.tree.getNode(group.id).children, [groupSetA.id, rootSet.id]);
-  assert.deepEqual(workspace.tree.root.children, [group.id]);
-});
-
-test("_performDropIntoGroup appends a set at the end of a group's children", async () => {
-  const { workspace, panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-  const rootSet = workspace.manager.sets[0];
-  const group = workspace.createGroup(workspace.tree.rootId, "union", "G");
-  panel._rebuild();
-
-  panel._performDropIntoGroup(rootSet.id, group.id);
-
-  assert.deepEqual(workspace.tree.getNode(group.id).children, [rootSet.id]);
-  assert.equal(workspace.tree.getNode(rootSet.id).parentId, group.id);
-});
-
-test("_performSiblingDrop is a no-op when dropping a node onto itself", async () => {
-  const { workspace, panel } = await setupDom();
-  panel.mount(document.getElementById("panel"));
-  const setA = workspace.manager.sets[0];
-
-  panel._performSiblingDrop(setA.id, setA.id, "before");
-
-  assert.deepEqual(workspace.tree.root.children, [setA.id]);
+  // Lower half of a = right after a = where b already is: no indicator, nothing rebuilt.
+  let rebuilds = 0;
+  const original = panel._rebuild.bind(panel);
+  panel._rebuild = () => { rebuilds++; original(); };
+  const over = fireDrag(card(a), "dragover", 90);
+  assert.equal(over.defaultPrevented, false);
+  assert.equal(document.querySelector(".rsp-drop-line"), null);
+  fireDrag(card(a), "drop", 90);
+  assert.equal(rebuilds, 0);
+  assert.deepEqual(workspace.tree.root.children, [a, b]);
 });
 
 // -------------------------------------------------------------------
@@ -493,4 +490,28 @@ test("the keyboard accessibility preference persists across a remount", async ()
 
   assert.equal(panelStorage.getItem("noitalambic.reactionSetPanel.keyboardAccessible"), "true");
   assert.ok(document.querySelector('[data-action="move-up"]'), "buttons should now be present after enabling");
+});
+
+test("excluded reactions are listed in the panel and can be restored one by one or all at once", async () => {
+  const { workspace, panel, getLastResult } = await setupDom();
+  const { reactions } = await import("./fixtures.js");
+  panel.mount(document.getElementById("panel"));
+  workspace.manager.updateSet(workspace.manager.sets[0].id, { reagents: ["fire"] });
+  panel.rebuild();
+  const all = getLastResult().totalCount;
+
+  workspace.excludeReactions([reactions[0], reactions[2]]);
+  panel.rebuild();
+  assert.equal(getLastResult().totalCount, all - 2);
+  const section = document.querySelector(".rsp-excluded");
+  assert.ok(section);
+  assert.match(section.querySelector("summary").textContent, /Excluded reactions\s+2 reactions/);
+  assert.match(section.textContent, /Water \+ Fire → Steam|water \+ fire → steam/i);
+  assert.match(document.querySelector("#rsp-summary").textContent, /2 excluded/);
+
+  document.querySelector('[data-action="restore-reaction"]').dispatchEvent(new window.Event("click"));
+  assert.equal(getLastResult().totalCount, all - 1);
+  document.querySelector('[data-action="restore-all-reactions"]').dispatchEvent(new window.Event("click"));
+  assert.equal(getLastResult().totalCount, all);
+  assert.equal(document.querySelector(".rsp-excluded"), null, "nothing excluded, no section");
 });

@@ -46,11 +46,29 @@ test("occupiedCells lists pinned nodes' cells, except the given node", () => {
   assert.deepEqual([...occupiedCells(grid, [a, b, c], b)], ["1,0"]);
 });
 
-test("'off' and unknown ids mean no grid; every configured grid is available", () => {
-  assert.equal(getSnapGrid("off"), null);
+test("every configured grid is available; unknown ids mean no grid (on/off is a separate switch)", () => {
   assert.equal(getSnapGrid("nope"), null);
-  assert.deepEqual(SNAP_GRID_IDS, ["off", "square", "rectangular", "hexagonal"]);
-  for (const id of SNAP_GRID_IDS.slice(1)) assert.ok(getSnapGrid(id));
+  assert.deepEqual(SNAP_GRID_IDS, ["square", "rectangular", "hexagonal"]);
+  for (const id of SNAP_GRID_IDS) assert.ok(getSnapGrid(id));
+});
+
+test("snapping on/off is stored on its own; settings saved before the switch existed carry over", async () => {
+  const { loadSnapEnabled, saveSnapEnabled, loadSnapGridId } = await import("../graph/gridSnap.js");
+  const { InMemoryStorage } = await import("../core/ReactionSetManager.js");
+  const storage = new InMemoryStorage();
+  assert.equal(loadSnapEnabled(storage), false, "off by default");
+  assert.equal(loadSnapGridId(storage), "square");
+
+  storage.setItem("noitalambic.graph.snapGrid", "hexagonal"); // old format: a grid was on
+  assert.equal(loadSnapEnabled(storage), true);
+  assert.equal(loadSnapGridId(storage), "hexagonal");
+
+  storage.setItem("noitalambic.graph.snapGrid", "off"); // old format: snapping was off
+  assert.equal(loadSnapEnabled(storage), false);
+  assert.equal(loadSnapGridId(storage), "square", "off is not a grid kind any more");
+
+  saveSnapEnabled(true, storage);
+  assert.equal(loadSnapEnabled(storage), true, "the switch wins once it was saved");
 });
 
 test("grid size scales both spacings (shape kept) and is clamped to its range", async () => {

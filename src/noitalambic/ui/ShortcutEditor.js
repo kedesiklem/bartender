@@ -63,7 +63,7 @@ export class ShortcutEditor {
           <div class="shortcut-editor-row"><kbd class="legend-kbd">${formatCombo(RESERVED_COMBO)}</kbd><span class="legend-text">Background: reset highlighting</span></div>
         </div>
         <p class="shortcut-editor-hint legend-text">Click a shortcut, then perform the new gesture on it (Esc to cancel). Using a gesture taken by another action swaps them.</p>
-        <button type="button" class="btn btn-sm btn-outline-secondary" data-shortcut-reset-all ${this._allDefault() ? "disabled" : ""}>Reset all shortcuts</button>
+        <button type="button" class="btn btn-outline theme-secondary" data-shortcut-reset-all ${this._allDefault() ? "disabled" : ""}>Reset all shortcuts</button>
       </div>`;
 
     this._bind();
@@ -179,8 +179,8 @@ function injectStyles() {
     .shortcut-editor-scope { font-size: 11px; text-transform: uppercase; opacity: 0.7; }
     .shortcut-editor-row { display: flex; align-items: center; gap: 8px; }
     .shortcut-editor-label { flex: 1; }
-    .shortcut-editor-combo { min-width: 9em; text-align: center; cursor: pointer; border: 1px solid var(--border-color, #555); background: transparent; color: inherit; }
-    .shortcut-editor-combo:hover { border-color: currentColor; }
+    .shortcut-editor-combo { min-width: 9em; text-align: center; cursor: pointer; border: 1px solid var(--secondary-border, #555); border-radius: var(--radius-3, 4px); background: transparent; color: inherit; }
+    .shortcut-editor-combo:hover { border-color: currentColor; background: var(--secondary-bg-muted, transparent); }
     .shortcut-editor-combo.is-unassigned { opacity: 0.5; font-style: italic; }
     .shortcut-editor-combo.is-recording { border-color: #ffd93d; color: #ffd93d; }
     .shortcut-editor-icon { background: none; border: none; color: inherit; cursor: pointer; padding: 0 4px; opacity: 0.7; }

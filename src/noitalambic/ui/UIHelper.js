@@ -25,6 +25,12 @@ export class UIHelper {
     return material?.name || id;
   }
 
+  // "Water + Fire → Steam": material names (tags as [tag]), empty slots skipped.
+  static reactionTitle(reaction, dataRepo) {
+    const side = (ids) => ids.filter(Boolean).map((id) => this.getMaterialName(id, dataRepo)).join(" + ");
+    return `${side([reaction?.reagent1, reaction?.reagent2, reaction?.reagent3])} → ${side([reaction?.product1, reaction?.product2, reaction?.product3])}`;
+  }
+
   static truncateName(name, maxLength = CONFIG.graph.constraints.maxNameLength) {
     return name.length > maxLength ? name.substring(0, CONFIG.graph.constraints.truncatedNameLength) + "..." : name;
   }

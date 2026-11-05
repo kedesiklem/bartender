@@ -57,11 +57,12 @@ export async function mount(host) {
   const wheelHint = html`<small class="fg-3" hidden>Hold Ctrl or ⌘ while scrolling to zoom</small>`;
   const settingsToggle = html`<button type="button" class="btn-outline theme-secondary" aria-controls="graphSettings"></button>`;
   const fullscreen = html`<button type="button" class="btn-outline theme-secondary" hidden></button>`;
+  const recenter = html`<button type="button" class="btn-outline theme-secondary" title="Fit the whole graph in the view">${iconLabel('bullseye', 'Recenter')}</button>`;
   const credit = html`<p class="graph-credit fg-3 mt-3 mb-0">Reactions Graph by <a class="brand-link" href="https://www.twitch.tv/kedesiklem"><img src="https://noita-bartender-images.acidflow.stream/images/logo/KED.svg" alt="Kedesiklem" width="60" height="24"></a></p>`;
   const settings = html`<div id="graphSettings" class="graph-settings" aria-label="Graph settings"></div>`;
   const layout = html`<div class="graph-layout">
     ${settings}
-    <section class="card graph-card"><div class="card-header flex-row flex-wrap align-items-center justify-content-between gap-3"><div class="d-flex flex-wrap align-items-center gap-3">${settingsToggle}<h2 id="reactionsCount" class="mb-0">Reactions</h2></div><div class="d-flex flex-wrap align-items-center gap-3">${wheelHint}${fullscreen}</div></div><div id="graphContainer"></div></section>
+    <section class="card graph-card"><div class="card-header flex-row flex-wrap align-items-center justify-content-between gap-3"><div class="d-flex flex-wrap align-items-center gap-3">${settingsToggle}<h2 id="reactionsCount" class="mb-0">Reactions</h2></div><div class="d-flex flex-wrap align-items-center gap-3">${wheelHint}${recenter}${fullscreen}</div></div><div id="graphContainer"></div></section>
   </div>`;
   host.replaceChildren(html`<div class="graph-page">${heading}${layout}${credit}</div>`);
   const container = layout.querySelector('#graphContainer');
@@ -97,6 +98,7 @@ export async function mount(host) {
   renderFullscreen();
 
   let mode = modeFromURL(), current = null;
+  recenter.addEventListener('click', () => current?.fitToView());
   const show = async () => {
     current?.dispose();
     current = await mountMode({datasets, settings, container, mode, switchMode});
@@ -154,6 +156,7 @@ async function mountMode({datasets, settings, container, mode, switchMode}) {
   bus.on('reactionSourceChanged', share.clear);
   await view.start();
   return {
+    fitToView: () => renderer.fitToView(),
     // Restore state in the existing instances so back/forward keeps graph controls usable.
     restore() {
       share.clear();
@@ -223,6 +226,12 @@ function createAdvancedMode({bus, repo, state, filter, builder}) {
     ChoicesLib: Choices, hideable: false,
     onSetsResolved: result => {ui.updateUIFromResolvedSets(result); history.replaceState(history.state, '', url());}});
   ui.reactionSetPanel = panel;
+  // Right-click a reaction > Exclude: shown reactions become eval(sets) \ excluded.
+  renderer.onExcludeReactions = reactions => {
+    workspace.excludeReactions(reactions);
+    panel.rebuild();
+    UIHelper.showNotification(reactions.length > 1 ? `Excluded ${reactions.length} reactions` : 'Reaction excluded (restore it from the reaction sets panel)');
+  };
   function quickAddMaterialToNewSet(materialId, role) {
     const name = repo.getMaterial(materialId)?.name || materialId;
     workspace.createSet(workspace.tree.rootId, role === 'reagent' ? {name, reagents: [materialId]} : {name, product: materialId});
@@ -286,31 +295,38 @@ function createAdvancedMode({bus, repo, state, filter, builder}) {
 }
 
 // Graph layout options, folded into one collapsible section so they don't crowd the settings:
-// force preset, grid snapping and, only with a grid, its size and whether physics keeps acting.
+// force preset, settling time, grid snapping and, only with a grid, its size.
 // The summary line tells the current choice while folded.
 function createLayoutSection(renderer) {
   const preset = Controls.select(FORCE_PRESET_IDS, {label: 'Force preset', value: renderer.forcePresetId,
     format: id => getForcePreset(id).label});
   const settle = Controls.range([SETTLE_SECONDS.min, SETTLE_SECONDS.max], {label: 'Settling time (s, 0 = none)', value: renderer.settleSeconds, step: SETTLE_SECONDS.step});
-  const grid = Controls.select(SNAP_GRID_IDS, {label: 'Grid snapping', value: renderer.snapGridId, format: snapGridLabel});
+  // Grid snapping: an on/off switch next to the grid kind.
+  const gridOn = html`<input type="checkbox" role="switch" aria-label="Snap nodes to a grid" title="Snap nodes to a grid">`;
+  gridOn.checked = renderer.snapEnabled;
+  const grid = Controls.select(SNAP_GRID_IDS, {value: renderer.snapGridId, format: snapGridLabel});
+  grid.querySelector('select').setAttribute('aria-label', 'Grid kind');
+  const gridRow = html`<div class="form-field"><span class="form-label">Grid snapping</span>
+    <div class="d-flex align-items-center gap-3"><div class="switch">${gridOn}</div><div class="flex-grow-1">${grid}</div></div></div>`;
   const scale = Controls.range([SNAP_SCALE.min, SNAP_SCALE.max], {label: 'Grid size (%)', value: renderer.snapScale, step: SNAP_SCALE.step});
   const hint = html`<small class="fg-3">Settling time 0 freezes everything on the grid. Right-click a node to pin it where it is.</small>`;
   const gridOptions = html`<div class="d-flex flex-column gap-3">${scale}${hint}</div>`;
   const summary = html`<span class="fg-3 small ms-2"></span>`;
   const refresh = () => {
-    const on = grid.value !== 'off';
+    const on = gridOn.checked;
     gridOptions.hidden = !on;
     summary.textContent = [`${getForcePreset(preset.value).label} ${settle.value ? `${settle.value} s` : 'static'}`,
       on && `${snapGridLabel(grid.value)} grid ${scale.value}%`].filter(Boolean).join(' · ');
   };
   preset.addEventListener('input', () => {renderer.setForcePreset(preset.value); refresh();});
   settle.addEventListener('input', () => {renderer.setSettleSeconds(settle.value); refresh();});
+  gridOn.addEventListener('change', () => {renderer.setSnapEnabled(gridOn.checked); refresh();});
   grid.addEventListener('input', () => {renderer.setSnapGrid(grid.value); refresh();});
   scale.addEventListener('input', () => {renderer.setSnapScale(scale.value); refresh();});
   refresh();
 
   const details = html`<details class="accordion-item"><summary class="accordion-header">Layout${summary}</summary>
-    <div class="accordion-body d-flex flex-column gap-3">${preset}${settle}${grid}${gridOptions}</div></details>`;
+    <div class="accordion-body d-flex flex-column gap-3">${preset}${settle}${gridRow}${gridOptions}</div></details>`;
   try {details.open = localStorage.getItem(LAYOUT_OPEN_KEY) === 'true';} catch {/* closed by default */}
   details.addEventListener('toggle', () => {
     try {localStorage.setItem(LAYOUT_OPEN_KEY, String(details.open));} catch {/* only loses the preference */}

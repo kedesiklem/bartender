@@ -9,7 +9,7 @@ import { UIHelper } from "../ui/UIHelper.js";
 import {allowGraphGesture} from './viewport.js';
 import { getSharedShortcutManager, formatCombo } from "../core/ShortcutManager.js";
 import { getForcePreset, loadForcePresetId, saveForcePresetId, alphaDecayFor, clampSettleSeconds, loadSettleSeconds, saveSettleSeconds } from "./forcePresets.js";
-import { getSnapGrid, loadSnapGridId, saveSnapGridId, loadSnapScale, saveSnapScale, clampScale, snapAll, nearestFreeCell, occupiedCells, forEachLatticePointInView, latticeTooDense } from "./gridSnap.js";
+import { getSnapGrid, loadSnapGridId, saveSnapGridId, loadSnapEnabled, saveSnapEnabled, loadSnapScale, saveSnapScale, clampScale, snapAll, nearestFreeCell, occupiedCells, forEachLatticePointInView, latticeTooDense } from "./gridSnap.js";
 
 export class GraphRenderer {
   static DOUBLE_CLICK_DELAY = 300;
@@ -23,9 +23,12 @@ export class GraphRenderer {
     this.graphDataBuilder = graphDataBuilder;
     this.shortcutManager = shortcutManager ?? getSharedShortcutManager();
     this.onQuickAddSet = onQuickAddSet;
+    // onExcludeReactions(reactions) enables "Exclude" in reaction menus (advanced mode sets it).
+    this.onExcludeReactions = null;
     this.forcePresetId = loadForcePresetId();
     this.settleSeconds = loadSettleSeconds();
     this.snapGridId = loadSnapGridId();
+    this.snapEnabled = loadSnapEnabled();
     this.snapScale = loadSnapScale();
     this._snapTimer = null;
     this._pendingClick = null; // single-click action waiting to see if a double-click follows
@@ -46,6 +49,7 @@ export class GraphRenderer {
     this._linkGroupSelection = null;
     this._nodeSelection = null;
     this._nodesById = new Map(); // id -> live simulation datum, carries x/y/vx/vy across renders
+    this._selectedIds = new Set(); // multi-selection (rectangle on the background), by node id
     this._resizeHandler = null;
   }
 
@@ -250,6 +254,7 @@ export class GraphRenderer {
       resizeObserver?.disconnect();
       this._simulation?.stop();
       this._stopSnapAnimation();
+      if (this._selectionKeyHandler) document.removeEventListener("keydown", this._selectionKeyHandler);
     };
   }
 
@@ -353,7 +358,14 @@ export class GraphRenderer {
       });
 
     svg.call(zoom);
+    this._zoom = zoom;
     svg.on("click", () => this._resetHighlighting(d3.selectAll(".node")));
+    // Right button drags pan the view (see allowGraphGesture): no browser menu on the background.
+    // Nodes keep theirs (or their own actions menu).
+    svg.on("contextmenu.pan", (event) => {
+      if (!event.target.closest?.(".node")) event.preventDefault();
+    });
+    this._setupSelectionRectangle(svg);
 
     return { svg, g };
   }
@@ -408,7 +420,7 @@ export class GraphRenderer {
             .attr("stroke", (d) => {
               if (d.type === "input") return CONFIG.graph.colors.inputArrow;
               if (d.type === "output") return CONFIG.graph.colors.outputArrow;
-              if (d.type === "tag-association") return CONFIG.graph.colors.tagNode;
+              if (d.type === "tag-association") return CONFIG.graph.colors.tagAssociation;
               return "#ccc";
             })
             .attr("stroke-width", (d) =>
@@ -552,6 +564,24 @@ export class GraphRenderer {
     else if (wasStatic) this._relayout(0.5); // settling back on: let the layout balance itself
   }
 
+  // Zooms/pans so the whole graph fits the view (labels included), centered: the "Recenter"
+  // button. Never zooms in past 100%, so a small graph is centered rather than blown up.
+  fitToView({ duration = 400, padding = 40 } = {}) {
+    const nodes = this._simulation?.nodes() ?? [];
+    if (!this._svg || !this._zoom || nodes.length === 0) return;
+    const width = Number(this._svg.attr("width")) || 1;
+    const height = Number(this._svg.attr("height")) || 1;
+    const labelRoom = CONFIG.graph.layout.labelOffsetMaterial + 12; // label under the node
+    const x0 = d3.min(nodes, (n) => n.x - n.radius), x1 = d3.max(nodes, (n) => n.x + n.radius);
+    const y0 = d3.min(nodes, (n) => n.y - n.radius), y1 = d3.max(nodes, (n) => n.y + n.radius + labelRoom);
+    const [minScale, maxScale] = this._zoom.scaleExtent();
+    const fit = Math.min((width - 2 * padding) / Math.max(1, x1 - x0), (height - 2 * padding) / Math.max(1, y1 - y0));
+    const k = Math.max(minScale, Math.min(1, maxScale, fit));
+    const transform = d3.zoomIdentity.translate(width / 2 - k * (x0 + x1) / 2, height / 2 - k * (y0 + y1) / 2).scale(k);
+    const target = duration > 0 ? this._svg.transition().duration(duration) : this._svg;
+    target.call(this._zoom.transform, transform);
+  }
+
   // Switches the force preset and lays the current graph out again with it.
   setForcePreset(id) {
     this.forcePresetId = id;
@@ -563,12 +593,23 @@ export class GraphRenderer {
     this._relayout(1);
   }
 
-  // Switches the snap grid ("off" or a CONFIG.graph.snapGrids id). Turning it on, or changing
-  // grid, snaps the current positions right away; turning it off releases every node to the
-  // simulation again.
+  // Switches the grid kind (a CONFIG.graph.snapGrids id); applied right away if snapping is on.
   setSnapGrid(id) {
     this.snapGridId = id;
     saveSnapGridId(id);
+    this._applySnapChange();
+  }
+
+  // Grid snapping on/off (the grid kind is kept either way).
+  setSnapEnabled(enabled) {
+    this.snapEnabled = !!enabled;
+    saveSnapEnabled(this.snapEnabled);
+    this._applySnapChange();
+  }
+
+  // Snapping on (or a different grid): snap the current positions right away. Off: release every
+  // node (but those pinned on purpose) to the simulation again.
+  _applySnapChange() {
     this._drawSnapGrid();
     if (!this._simulation) return;
     this._stopSnapAnimation();
@@ -623,7 +664,116 @@ export class GraphRenderer {
   }
 
   _snapGrid() {
-    return getSnapGrid(this.snapGridId, this.snapScale);
+    return this.snapEnabled ? getSnapGrid(this.snapGridId, this.snapScale) : null;
+  }
+
+  // ---------------------------------------------------------------------
+  // Multi-selection
+  // ---------------------------------------------------------------------
+
+  // Left-dragging the background draws a selection rectangle; on release the nodes inside become
+  // the selection (Shift: added to it). A plain left click on the background (no drag) clears
+  // it, as does Escape. Mouse events, so jsdom can drive it; touch keeps panning.
+  _setupSelectionRectangle(svg) {
+    let start = null;
+    let rect = null;
+    const point = (event) => d3.pointer(event, svg.node());
+    const move = (event) => {
+      if (!start) return;
+      const [x, y] = point(event);
+      if (!rect && Math.hypot(x - start.x, y - start.y) < 4) return;
+      rect ??= svg.append("rect").attr("class", "selection-rectangle")
+        .attr("fill", "rgba(255,255,0,0.08)").attr("stroke", CONFIG.graph.colors.selectedHighlight)
+        .attr("stroke-dasharray", "4,3").style("pointer-events", "none");
+      rect.attr("x", Math.min(x, start.x)).attr("y", Math.min(y, start.y))
+        .attr("width", Math.abs(x - start.x)).attr("height", Math.abs(y - start.y));
+    };
+    const up = (event) => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      if (!start) return;
+      const [x, y] = point(event);
+      const additive = start.additive;
+      const dragged = !!rect;
+      rect?.remove();
+      rect = null;
+      const box = { x0: Math.min(x, start.x), x1: Math.max(x, start.x), y0: Math.min(y, start.y), y1: Math.max(y, start.y) };
+      start = null;
+      if (!dragged) {
+        if (!additive) this.clearSelection();
+        return;
+      }
+      // The click that follows this release must not also reset the highlight / selection.
+      this._suppressNextBackgroundClick = true;
+      const t = this._zoomTransform ?? d3.zoomIdentity;
+      const inside = (this._simulation?.nodes() ?? []).filter((node) => {
+        const [sx, sy] = t.apply([node.x, node.y]);
+        return sx >= box.x0 && sx <= box.x1 && sy >= box.y0 && sy <= box.y1;
+      });
+      this.setSelection([...(additive ? this._selectedIds : []), ...inside.map((node) => node.id)]);
+    };
+    svg.on("mousedown.select", (event) => {
+      if (event.button !== 0 || event.target.closest?.(".node")) return;
+      const [x, y] = point(event);
+      start = { x, y, additive: event.shiftKey };
+      event.preventDefault(); // no text selection while drawing
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
+    svg.on("click.select", (event) => {
+      if (!this._suppressNextBackgroundClick) return;
+      this._suppressNextBackgroundClick = false;
+      event.stopImmediatePropagation();
+    }, true);
+    this._selectionKeyHandler ??= (event) => {
+      if (event.key === "Escape" && this._selectedIds.size && !this._activeContextMenu) this.clearSelection();
+    };
+    document.removeEventListener("keydown", this._selectionKeyHandler);
+    document.addEventListener("keydown", this._selectionKeyHandler);
+  }
+
+  setSelection(ids) {
+    const visible = new Set((this._simulation?.nodes() ?? []).map((node) => node.id));
+    this._selectedIds = new Set([...ids].filter((id) => visible.has(id)));
+    this._refreshSelection();
+  }
+
+  clearSelection() {
+    if (!this._selectedIds.size) return;
+    this._selectedIds.clear();
+    this._refreshSelection();
+  }
+
+  selectedNodes() {
+    return (this._simulation?.nodes() ?? []).filter((node) => this._selectedIds.has(node.id));
+  }
+
+  // Nodes moved together by dragging `node`: the whole selection if it is part of it, with each
+  // node's offset from the dragged one.
+  _dragGroup(node) {
+    const nodes = this._selectedIds.has(node.id) ? this.selectedNodes() : [node];
+    return nodes.map((n) => ({ node: n, dx: n.x - node.x, dy: n.y - node.y }));
+  }
+
+  // Dashed ring on selected nodes; drops ids of nodes no longer shown.
+  _refreshSelection() {
+    if (!this._nodeSelection) return;
+    const shown = new Set();
+    this._nodeSelection.each((d, i, els) => {
+      shown.add(d.id);
+      const selection = d3.select(els[i]);
+      const ring = selection.select(":scope > .selection-ring");
+      const selected = this._selectedIds.has(d.id);
+      selection.classed("selected", selected);
+      if (!selected) return ring.remove();
+      if (!ring.empty()) return;
+      selection.insert("circle", ":first-child").attr("class", "selection-ring").attr("r", d.radius + 9)
+        .attr("fill", "none").attr("stroke", CONFIG.graph.colors.selectedHighlight).attr("stroke-width", 2)
+        .attr("stroke-dasharray", "5,4").style("pointer-events", "none");
+    });
+    this._selectedIds.forEach((id) => {
+      if (!shown.has(id)) this._selectedIds.delete(id);
+    });
   }
 
   // Releases nodes to the simulation, except those pinned on purpose (node.pinned), which keep
@@ -691,8 +841,9 @@ export class GraphRenderer {
     const step = (t) => {
       targets.forEach((target, node) => {
         const start = starts.get(node);
-        node.x = start.x + (target.x - start.x) * t;
-        node.y = start.y + (target.y - start.y) * t;
+        // Exact target at the end: start + (target - start) * 1 can be off by a rounding error.
+        node.x = t === 1 ? target.x : start.x + (target.x - start.x) * t;
+        node.y = t === 1 ? target.y : start.y + (target.y - start.y) * t;
       });
       this._onTick();
     };
@@ -775,48 +926,67 @@ export class GraphRenderer {
   _joinNodes(g, visibleNodes, linkArray) {
     const simulation = this._simulation;
     // A normal d3 drag (neighbors follow, gravity keeps working); with a grid the dragged node
-    // moves cell to cell. On release it is let go, unless it was pinned on purpose ("Pin
-    // position" in its menu): then it stays where it is dropped, physics never moving it. With
-    // no settling (settling time 0) nothing ticks, so the node is moved by hand and stays put.
+    // moves cell to cell. Dragging a selected node moves the whole selection, offsets kept (each
+    // node on its own cell with a grid). On release nodes are let go, unless pinned on purpose
+    // ("Pin position" in the menu): those stay where they are dropped, physics never moving
+    // them. With no settling (settling time 0) nothing ticks: nodes are moved by hand, stay put.
+    // Nothing happens until the pointer actually moves: a plain click (d3 still sends start/end)
+    // must neither move the node nor shake the layout.
+    let group = [];
+    let moved = false;
     const drag = d3
       .drag()
       .on("start", (event, d) => {
-        if (this._noSettling()) return;
-        this._stopSnapAnimation();
-        if (!event.active) simulation.alphaTarget(0.3).restart();
-        d.fx = d.x;
-        d.fy = d.y;
+        group = this._dragGroup(d);
+        moved = false;
       })
-      .on("drag", (event, d) => {
-        const grid = this._snapGrid();
-        const at = grid ? grid.nearest(event.x, event.y) : event;
-        d.fx = at.x;
-        d.fy = at.y;
-        if (this._noSettling()) {
+      .on("drag", (event) => {
+        if (!moved) {
+          moved = true;
           this._stopSnapAnimation();
-          d.x = at.x;
-          d.y = at.y;
-          this._onTick();
+          if (!this._noSettling()) simulation.alphaTarget(0.3).restart();
         }
+        const grid = this._snapGrid();
+        group.forEach(({ node, dx, dy }) => {
+          const target = { x: event.x + dx, y: event.y + dy };
+          const at = grid ? grid.nearest(target.x, target.y) : target;
+          node.fx = at.x;
+          node.fy = at.y;
+          if (this._noSettling()) {
+            node.x = at.x;
+            node.y = at.y;
+          }
+        });
+        if (this._noSettling()) this._onTick();
       })
-      .on("end", (event, d) => {
+      .on("end", (event) => {
+        if (!moved) {
+          group = [];
+          return;
+        }
         const grid = this._snapGrid();
         if (!this._noSettling() && !event.active) simulation.alphaTarget(0);
-        // Where it lands: the closest free cell with a grid (no two nodes on one cell).
-        if (grid && (d.pinned || this._noSettling())) {
-          const cell = nearestFreeCell(grid, d.fx, d.fy, occupiedCells(grid, simulation.nodes(), d));
-          d.fx = cell.x;
-          d.fy = cell.y;
-          if (this._noSettling()) {
-            d.x = cell.x;
-            d.y = cell.y;
-            this._onTick();
+        // Where they land: with a grid, each on the closest free cell (no two nodes on one cell).
+        const moving = new Set(group.map(({ node }) => node));
+        const occupied = grid ? occupiedCells(grid, simulation.nodes().filter((n) => !moving.has(n))) : null;
+        group.forEach(({ node }) => {
+          if (grid && (node.pinned || this._noSettling())) {
+            const cell = nearestFreeCell(grid, node.fx ?? node.x, node.fy ?? node.y, occupied);
+            occupied.add(grid.key(cell.i, cell.j));
+            node.fx = cell.x;
+            node.fy = cell.y;
+            if (this._noSettling()) {
+              node.x = cell.x;
+              node.y = cell.y;
+            }
           }
-        }
-        if (!d.pinned) {
-          d.fx = null;
-          d.fy = null;
-        }
+          if (!node.pinned) {
+            node.fx = null;
+            node.fy = null;
+          }
+        });
+        if (this._noSettling()) this._onTick();
+        group = [];
       });
 
     let nodesContainer = g.select(":scope > g.nodes-root");
@@ -869,6 +1039,7 @@ export class GraphRenderer {
     nodeSelection.on("dblclick", (event) => event.stopPropagation());
     this._nodeSelection = nodeSelection;
     this._refreshPinBadges();
+    this._refreshSelection();
 
     return nodeSelection;
   }
@@ -1125,6 +1296,7 @@ export class GraphRenderer {
       addProductToNewSet: (node) => this.onQuickAddSet && this.onQuickAddSet(node.id, "product"),
       openMaterialMenu: (node, event, ctx) => this._showNodeContextMenu(event, node, ctx),
       openTagMenu: (node, event, ctx) => this._showNodeContextMenu(event, node, ctx),
+      openReactionMenu: (node, event, ctx) => this._showNodeContextMenu(event, node, ctx),
       toggleTagMaterials: (node) => this.state.toggleTagVisibility(node.id),
     }[actionId];
   }
@@ -1205,19 +1377,47 @@ export class GraphRenderer {
     if (ctx) entries.push({ label: "Highlight connections", run: () => this._highlightConnections(node, ctx.allNodes, ctx.linkArray) });
     // Pin a node where it is (on its grid cell, if any) so physics leaves it alone - it can still
     // be dragged - or let it go again.
-    if (this._simulation) {
+    const selected = this._selectedIds.has(node.id) && this._selectedIds.size > 1 ? this.selectedNodes() : null;
+    if (this._simulation && selected) {
+      entries.push({ label: `Pin selected (${selected.length})`, run: () => selected.forEach((n) => this._setPinned(n, true)) });
+      if (selected.some((n) => n.pinned)) {
+        entries.push({ label: `Unpin selected (${selected.length})`, run: () => selected.forEach((n) => n.pinned && this._setPinned(n, false)) });
+      }
+      entries.push({ label: "Clear selection", run: () => this.clearSelection() });
+    } else if (this._simulation) {
       if (node.pinned) {
         entries.push({ label: "Unpin position", run: () => this._setPinned(node, false) });
       } else {
         entries.push({ label: "Pin position", run: () => this._setPinned(node, true) });
       }
     }
+    if (node.type === "reaction" && ctx) {
+      // The reaction and every material/tag it links to, as the selection: handy to move a whole
+      // reaction around at once.
+      entries.splice(1, 0, {
+        label: "Select with its materials",
+        run: () => {
+          const ids = new Set([node.id]);
+          ctx.linkArray.forEach(({ source, target }) => {
+            if (source.id === node.id) ids.add(target.id);
+            if (target.id === node.id) ids.add(source.id);
+          });
+          this.setSelection(ids);
+        },
+      });
+    }
+    // Excluding needs reaction sets (advanced mode): see onExcludeReactions.
+    if (node.type === "reaction" && this.onExcludeReactions) {
+      const reactions = (selected ?? [node]).filter((n) => n.type === "reaction").map((n) => n.reaction);
+      const label = selected && reactions.length > 1 ? `Exclude selected reactions (${reactions.length})` : "Exclude this reaction";
+      entries.push({ label, run: () => this.onExcludeReactions(selected && reactions.length > 1 ? reactions : [node.reaction]) });
+    }
     if (node.type === "tag") {
       entries.push({ label: "Show all materials", run: () => this.state.showTagMaterials(node.id) });
       entries.push({ label: "Hide all materials", run: () => this.state.hideTagMaterials(node.id) });
       return entries;
     }
-    const menuActions = new Set(["openMaterialMenu", "openTagMenu"]);
+    const menuActions = new Set(["openMaterialMenu", "openTagMenu", "openReactionMenu"]);
     const needsSets = new Set(["addReagentToNewSet", "addProductToNewSet"]);
     this.shortcutManager.getActions(node.type).forEach((action) => {
       if (menuActions.has(action.id) || (needsSets.has(action.id) && !this.onQuickAddSet)) return;
@@ -1251,7 +1451,8 @@ export class GraphRenderer {
     ].join(";");
 
     const title = document.createElement("div");
-    title.textContent = node.type === "tag" ? `[${node.tag || node.id}]` : node.name || node.id;
+    title.textContent = node.type === "tag" ? `[${node.tag || node.id}]`
+      : node.type === "reaction" ? UIHelper.reactionTitle(node.reaction, this.dataRepo) : node.name || node.id;
     title.style.cssText = "color:#999;padding:4px 8px;border-bottom:1px solid #444;margin-bottom:4px;";
     menu.appendChild(title);
 
