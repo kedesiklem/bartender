@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { GraphRenderer } from "../graph/GraphRenderer.js";
+import { ConnectionHighlighter } from "../graph/ConnectionHighlighter.js";
 import { ShortcutManager } from "../core/ShortcutManager.js";
 import { InMemoryStorage } from "../core/ReactionSetManager.js";
 
@@ -14,8 +15,8 @@ function buildRenderer(overrides = {}) {
     onQuickAddSet: (id, role) => calls.push(["quickAdd", id, role]),
     state: { toggleTagVisibility: (id) => calls.push(["toggle", id]) },
     _pendingClick: null,
-    _highlightConnections: (node) => calls.push(["highlight", node.id]),
-    _showNodeContextMenu: (event, node) => calls.push([node.type === "tag" ? "tagMenu" : "materialMenu", node.id, event.clientX]),
+    highlighter: { highlight: (node) => calls.push(["highlight", node.id]) },
+    menu: { show: (event, node) => calls.push([node.type === "tag" ? "tagMenu" : "materialMenu", node.id, event.clientX]) },
     _openMaterialWiki: (node) => calls.push(["wiki", node.id]),
     _selectMaterialAsProduct: (node) => calls.push(["product", node.id]),
     _selectMaterialAsReagent: (node) => calls.push(["reagent", node.id]),
@@ -149,26 +150,26 @@ test("a single click waits when the same modifiers are also bound to a double-cl
 test("withoutHighlight clears the current highlight for fn() and restores it after, even if fn throws", () => {
   const log = [];
   const fake = {
-    _highlight: null,
-    _resetHighlighting() {
-      this._highlight = null;
+    current: null,
+    reset() {
+      this.current = null;
       log.push("reset");
     },
-    _highlightConnections(node, allNodes, linkArray) {
-      this._highlight = { node, allNodes, linkArray };
+    highlight(node, allNodes, linkArray) {
+      this.current = { node, allNodes, linkArray };
       log.push(`highlight:${node.id}`);
     },
   };
-  const withoutHighlight = (fn) => GraphRenderer.prototype.withoutHighlight.call(fake, fn);
+  const withoutHighlight = (fn) => ConnectionHighlighter.prototype.without.call(fake, fn);
 
   assert.equal(withoutHighlight(() => "plain"), "plain");
   assert.deepEqual(log, [], "nothing highlighted: nothing to undo");
 
-  fake._highlight = { node: material, allNodes: [], linkArray: [] };
+  fake.current = { node: material, allNodes: [], linkArray: [] };
   assert.throws(() => withoutHighlight(() => {
-    log.push(`during:${fake._highlight}`);
+    log.push(`during:${fake.current}`);
     throw new Error("boom");
   }));
   assert.deepEqual(log, ["reset", "during:null", "highlight:water"]);
-  assert.equal(fake._highlight.node, material);
+  assert.equal(fake.current.node, material);
 });

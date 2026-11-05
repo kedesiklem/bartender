@@ -252,7 +252,7 @@ test("pinning is explicit, from the node menu ('Pin position' / 'Unpin position'
   graphRenderer.setSnapGrid("square");
   graphRenderer.setSnapEnabled(true);
   const node = graphRenderer._simulation.nodes().find((n) => n.type === "material");
-  const entry = (label) => graphRenderer._contextMenuEntries(node, null).find((e) => e.label === label);
+  const entry = (label) => graphRenderer.menu.entries(node, null).find((e) => e.label === label);
   assert.ok(!entry("Unpin position"), "free nodes have nothing to unpin");
   node.x += 17;
   entry("Pin position").run();
@@ -278,7 +278,7 @@ test("a pinned node is out of the physics' reach, and stays pinned through layou
   graphRenderer.setSnapGrid("square");
   graphRenderer.setSnapEnabled(true);
   const node = simulation.nodes().find((n) => n.type === "material");
-  graphRenderer._contextMenuEntries(node, null).find((e) => e.label === "Pin position").run();
+  graphRenderer.menu.entries(node, null).find((e) => e.label === "Pin position").run();
   const at = [node.fx, node.fy];
 
   simulation.alpha(1);
@@ -306,7 +306,7 @@ test("without a grid, a node can be pinned too", async () => {
   graphRenderer.setSnapEnabled(false);
   const node = graphRenderer._simulation.nodes()[0];
   const [x, y] = [node.x, node.y];
-  graphRenderer._contextMenuEntries(node, null).find((e) => e.label === "Pin position").run();
+  graphRenderer.menu.entries(node, null).find((e) => e.label === "Pin position").run();
   assert.deepEqual([node.fx, node.fy], [x, y], "pinned where it is");
   graphRenderer._simulation.stop();
 });
@@ -391,4 +391,26 @@ test("settling time 0: nothing simulates - nodes stay put (centered in view), re
   graphRenderer.setSnapEnabled(false);
   graphRenderer.setSettleSeconds(5);
   graphRenderer._simulation.stop();
+});
+
+test("pause freezes the physics where it is (settling time kept); play lets the layout balance again", async () => {
+  const { graphRenderer, reactionFilter } = await setupDom();
+  const simulation = graphRenderer._simulation;
+  simulation.stop();
+  graphRenderer.setSettleSeconds(3);
+  const positions = () => simulation.nodes().map((n) => `${n.id}:${n.x.toFixed(3)},${n.y.toFixed(3)}`).sort().join(" ");
+
+  graphRenderer.setPaused(true);
+  assert.equal(graphRenderer.paused, true);
+  assert.equal(graphRenderer.settleSeconds, 3, "the settling time is untouched");
+  const frozen = positions();
+  graphRenderer.setForcePreset("spacious");
+  graphRenderer.render(reactionFilter.getFilteredReactionsAdvanced({ reagents: ["fire"] }));
+  assert.equal(positions(), frozen, "neither a re-layout nor an update moves anything while paused");
+
+  graphRenderer.setPaused(false);
+  assert.equal(graphRenderer.paused, false);
+  assert.ok(graphRenderer._simulation.alpha() > 0.1, "play wakes the layout up");
+  graphRenderer._simulation.stop();
+  assert.equal(window.localStorage.getItem("noitalambic.graph.paused"), null, "pause isn't saved");
 });

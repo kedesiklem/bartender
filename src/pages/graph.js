@@ -58,11 +58,14 @@ export async function mount(host) {
   const settingsToggle = html`<button type="button" class="btn-outline theme-secondary" aria-controls="graphSettings"></button>`;
   const fullscreen = html`<button type="button" class="btn-outline theme-secondary" hidden></button>`;
   const recenter = html`<button type="button" class="btn-outline theme-secondary" title="Fit the whole graph in the view">${iconLabel('bullseye', 'Recenter')}</button>`;
+  // Play/pause the physics, next to the graph so it stays at hand whatever is folded or hidden.
+  // Pausing freezes nodes where they are; the settling time is left alone.
+  const playPause = html`<button type="button" class="btn-outline theme-secondary"></button>`;
   const credit = html`<p class="graph-credit fg-3 mt-3 mb-0">Reactions Graph by <a class="brand-link" href="https://www.twitch.tv/kedesiklem"><img src="https://noita-bartender-images.acidflow.stream/images/logo/KED.svg" alt="Kedesiklem" width="60" height="24"></a></p>`;
   const settings = html`<div id="graphSettings" class="graph-settings" aria-label="Graph settings"></div>`;
   const layout = html`<div class="graph-layout">
     ${settings}
-    <section class="card graph-card"><div class="card-header flex-row flex-wrap align-items-center justify-content-between gap-3"><div class="d-flex flex-wrap align-items-center gap-3">${settingsToggle}<h2 id="reactionsCount" class="mb-0">Reactions</h2></div><div class="d-flex flex-wrap align-items-center gap-3">${wheelHint}${recenter}${fullscreen}</div></div><div id="graphContainer"></div></section>
+    <section class="card graph-card"><div class="card-header flex-row flex-wrap align-items-center justify-content-between gap-3"><div class="d-flex flex-wrap align-items-center gap-3">${settingsToggle}<h2 id="reactionsCount" class="mb-0">Reactions</h2></div><div class="d-flex flex-wrap align-items-center gap-3">${wheelHint}${playPause}${recenter}${fullscreen}</div></div><div id="graphContainer"></div></section>
   </div>`;
   host.replaceChildren(html`<div class="graph-page">${heading}${layout}${credit}</div>`);
   const container = layout.querySelector('#graphContainer');
@@ -99,9 +102,20 @@ export async function mount(host) {
 
   let mode = modeFromURL(), current = null;
   recenter.addEventListener('click', () => current?.fitToView());
+  const renderPlayPause = () => {
+    const paused = current?.isPaused() ?? false;
+    playPause.replaceChildren(iconLabel(paused ? 'play-fill' : 'pause-fill', paused ? 'Play' : 'Pause'));
+    playPause.setAttribute('aria-pressed', String(paused));
+    playPause.title = paused ? 'Resume the physics: the layout balances itself again' : 'Pause the physics: freeze every node where it is';
+  };
+  playPause.addEventListener('click', () => {
+    current?.setPaused(!current.isPaused());
+    renderPlayPause();
+  });
   const show = async () => {
     current?.dispose();
     current = await mountMode({datasets, settings, container, mode, switchMode});
+    renderPlayPause(); // a new mode comes with a new (playing) renderer
     fitting.refresh();
   };
   async function switchMode(nextMode, url) {
@@ -157,6 +171,8 @@ async function mountMode({datasets, settings, container, mode, switchMode}) {
   await view.start();
   return {
     fitToView: () => renderer.fitToView(),
+    isPaused: () => renderer.paused,
+    setPaused: paused => renderer.setPaused(paused),
     // Restore state in the existing instances so back/forward keeps graph controls usable.
     restore() {
       share.clear();

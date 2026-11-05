@@ -44,8 +44,9 @@ export function allowGraphGesture(event, container) {
   const partlyHidden = rect.top < -1 || rect.bottom > (view.visualViewport?.height ?? view.innerHeight) + 1;
   const pageScrolls = !document.fullscreenElement?.contains(container) && (container.dataset.viewportOverflow === 'true' || partlyHidden);
   if (event.type === 'wheel' && pageScrolls && !event.ctrlKey && !event.metaKey) return false;
-  // The mouse pans with the right button: the left one draws a selection rectangle on the
-  // background (see GraphRenderer). Touch, wheel and double-click keep their usual gestures.
-  if (event.type === 'mousedown') return event.button === 2;
+  // The mouse pans with the right or middle button (middle: easier on a touchpad-less mouse
+  // and the usual alternative; right: hard on touchpads): the left one draws a selection
+  // rectangle on the background (see GraphRenderer). Touch, wheel and double-click are unchanged.
+  if (event.type === 'mousedown') return event.button === 2 || event.button === 1;
   return (!event.ctrlKey || event.type === 'wheel') && !event.button;
 }

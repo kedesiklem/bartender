@@ -75,24 +75,24 @@ test("dragging a selected node moves the whole selection, offsets kept; an unsel
   const { renderer } = await setupDom();
   const [a, b, c] = renderer._simulation.nodes();
   renderer.setSelection([a.id, b.id]);
-  const group = renderer._dragGroup(a);
+  const group = renderer.selection.dragGroup(a);
   assert.deepEqual(new Set(group.map((g) => g.node.id)), new Set([a.id, b.id]));
   const ofB = group.find((g) => g.node === b);
   assert.deepEqual([ofB.dx, ofB.dy], [b.x - a.x, b.y - a.y]);
-  assert.deepEqual(renderer._dragGroup(c).map((g) => g.node.id), [c.id]);
+  assert.deepEqual(renderer.selection.dragGroup(c).map((g) => g.node.id), [c.id]);
 });
 
 test("a selected node's menu acts on the selection (pin / unpin / clear)", async () => {
   const { renderer } = await setupDom();
   const [a, b] = renderer._simulation.nodes();
   renderer.setSelection([a.id, b.id]);
-  const labels = renderer._contextMenuEntries(a, null).map((e) => e.label);
+  const labels = renderer.menu.entries(a, null).map((e) => e.label);
   assert.ok(labels.includes("Pin selected (2)") && labels.includes("Clear selection"));
-  renderer._contextMenuEntries(a, null).find((e) => e.label === "Pin selected (2)").run();
+  renderer.menu.entries(a, null).find((e) => e.label === "Pin selected (2)").run();
   assert.ok(a.pinned && b.pinned);
-  renderer._contextMenuEntries(a, null).find((e) => e.label === "Unpin selected (2)").run();
+  renderer.menu.entries(a, null).find((e) => e.label === "Unpin selected (2)").run();
   assert.ok(!a.pinned && !b.pinned);
-  renderer._contextMenuEntries(a, null).find((e) => e.label === "Clear selection").run();
+  renderer.menu.entries(a, null).find((e) => e.label === "Clear selection").run();
   assert.equal(renderer.selectedNodes().length, 0);
   renderer._simulation.stop();
 });
@@ -127,16 +127,16 @@ test("right-clicking a reaction opens its menu: readable title, highlight, selec
 test("a reaction's menu offers 'Exclude' only when excluding is possible, for the selection too", async () => {
   const { renderer } = await setupDom();
   const reactions = renderer._simulation.nodes().filter((n) => n.type === "reaction");
-  const labels = (node) => renderer._contextMenuEntries(node, null).map((e) => e.label);
+  const labels = (node) => renderer.menu.entries(node, null).map((e) => e.label);
   assert.ok(!labels(reactions[0]).some((l) => l.startsWith("Exclude")), "classic mode: no sets, nothing to exclude from");
 
   const excluded = [];
   renderer.onExcludeReactions = (list) => excluded.push(list);
-  renderer._contextMenuEntries(reactions[0], null).find((e) => e.label === "Exclude this reaction").run();
+  renderer.menu.entries(reactions[0], null).find((e) => e.label === "Exclude this reaction").run();
   assert.deepEqual(excluded[0], [reactions[0].reaction]);
 
   renderer.setSelection(reactions.slice(0, 2).map((n) => n.id));
-  renderer._contextMenuEntries(reactions[0], null).find((e) => e.label === "Exclude selected reactions (2)").run();
+  renderer.menu.entries(reactions[0], null).find((e) => e.label === "Exclude selected reactions (2)").run();
   assert.deepEqual(excluded[1], reactions.slice(0, 2).map((n) => n.reaction));
 });
 
@@ -208,4 +208,11 @@ test("a plain click doesn't wake the layout up; an actual drag does and moves th
   assert.ok(node.fx == null, "released (not pinned) on drop");
   renderer.setSettleSeconds(5);
   simulation.stop();
+});
+
+test("a middle-button press on the graph doesn't trigger the browser's own action (autoscroll, paste)", async () => {
+  const { svg } = await setupDom();
+  assert.equal(mouse(svg, "mousedown", { button: 1 }).defaultPrevented, true);
+  assert.equal(mouse(svg, "auxclick", { button: 1 }).defaultPrevented, true);
+  assert.equal(document.querySelector(".selection-rectangle"), null, "and it draws no selection rectangle");
 });

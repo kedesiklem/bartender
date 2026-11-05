@@ -41,6 +41,7 @@ test('scrolling a tall page does not zoom the graph, while modifier zoom and nor
   assert.equal(allowGraphGesture({...wheel,metaKey:true},container),true);
   assert.equal(allowGraphGesture({type:'mousedown',button:0,ctrlKey:false},container),false,'the left button selects, it does not pan');
   assert.equal(allowGraphGesture({type:'mousedown',button:2,ctrlKey:false},container),true,'the right button pans');
+  assert.equal(allowGraphGesture({type:'mousedown',button:1,ctrlKey:false},container),true,'the middle button pans too');
   assert.equal(allowGraphGesture({type:'touchstart',ctrlKey:false},container),true,'touch still pans');
 });
 
