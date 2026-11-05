@@ -15,7 +15,7 @@ function buildRenderer(overrides = {}) {
     state: { toggleTagVisibility: (id) => calls.push(["toggle", id]) },
     _pendingClick: null,
     _highlightConnections: (node) => calls.push(["highlight", node.id]),
-    _showTagContextMenu: (event, node) => calls.push(["tagMenu", node.id, event.clientX]),
+    _showNodeContextMenu: (event, node) => calls.push([node.type === "tag" ? "tagMenu" : "materialMenu", node.id, event.clientX]),
     _openMaterialWiki: (node) => calls.push(["wiki", node.id]),
     _selectMaterialAsProduct: (node) => calls.push(["product", node.id]),
     _selectMaterialAsReagent: (node) => calls.push(["reagent", node.id]),
@@ -87,8 +87,17 @@ test("right-click on a tag opens its menu and suppresses the native menu", () =>
   assert.equal(e.defaultPrevented, true);
 });
 
-test("right-click with nothing bound leaves the native menu alone", () => {
+test("right-click on a material opens its actions menu by default", () => {
   const { calls, dispatch } = buildRenderer();
+  const e = event("contextmenu");
+  dispatch(e, material);
+  assert.deepEqual(calls, [["materialMenu", "water", 10]]);
+  assert.equal(e.defaultPrevented, true);
+});
+
+test("right-click with nothing bound leaves the native menu alone", () => {
+  const { fake, calls, dispatch } = buildRenderer();
+  fake.shortcutManager.clearBinding("openMaterialMenu");
   const e = event("contextmenu");
   dispatch(e, material);
   assert.deepEqual(calls, []);

@@ -59,7 +59,7 @@ test("resolve is scoped by node type", () => {
   assert.equal(m.resolve("material", ev("click", { ctrlKey: true })), "selectAsReagent");
   assert.equal(m.resolve("tag", ev("click", { ctrlKey: true })), null);
   assert.equal(m.resolve("tag", ev("contextmenu")), "openTagMenu");
-  assert.equal(m.resolve("material", ev("contextmenu")), null);
+  assert.equal(m.resolve("material", ev("contextmenu")), "openMaterialMenu");
   assert.equal(m.resolve("reaction", ev("click", { ctrlKey: true })), null);
 });
 
@@ -71,7 +71,7 @@ test("a single-click binding does not match the second click of a double-click",
 test("the same gesture can be bound in two scopes at once", () => {
   const m = build();
   const result = m.setBinding("openMaterialWiki", "RightClick");
-  assert.deepEqual(result, { ok: true, swappedWith: null });
+  assert.deepEqual(result, { ok: true, swappedWith: "openMaterialMenu" });
   assert.equal(m.resolve("material", ev("contextmenu")), "openMaterialWiki");
   assert.equal(m.resolve("tag", ev("contextmenu")), "openTagMenu");
 });

@@ -15,6 +15,8 @@ import {getSharedShortcutManager} from '../noitalambic/core/ShortcutManager.js';
 import {ReactionFilter} from '../noitalambic/filters/ReactionFilter.js';
 import {GraphDataBuilder} from '../noitalambic/graph/GraphDataBuilder.js';
 import {GraphRenderer} from '../noitalambic/graph/GraphRenderer.js';
+import {FORCE_PRESET_IDS, SETTLE_SECONDS, getForcePreset} from '../noitalambic/graph/forcePresets.js';
+import {SNAP_GRID_IDS, SNAP_SCALE, snapGridLabel} from '../noitalambic/graph/gridSnap.js';
 import {UIController} from '../noitalambic/ui/UIController.js';
 import {ChoicesInitializer} from '../noitalambic/ui/ChoicesInitializer.js';
 import {ReactionSetPanel} from '../noitalambic/ui/ReactionSetPanel.js';
@@ -33,6 +35,7 @@ const modeFromURL = () => {
 };
 
 const SETTINGS_OPEN_KEY = 'bartender.reactionsGraph.settingsOpen';
+const LAYOUT_OPEN_KEY = 'bartender.reactionsGraph.layoutOpen';
 const readSettingsOpen = () => {
   try {return localStorage.getItem(SETTINGS_OPEN_KEY) !== 'false';} catch {return true;}
 };
@@ -135,6 +138,7 @@ async function mountMode({datasets, settings, container, mode, switchMode}) {
   source.addEventListener('input', () => state.setReactionSource(source.value));
   const view = advanced ? createAdvancedMode({bus, repo, state, filter, builder}) : createClassicMode({bus, repo, state, filter, builder});
   const {ui, renderer} = view;
+  const layoutSection = createLayoutSection(renderer);
   const share = createShareButton(view.url, Controls);
   const reset = createResetButton(Controls, () => {view.reset(); share.clear();});
   const unused = ui.createUnusedMaterialsToggle(Controls), download = ui.createExportButton();
@@ -144,6 +148,7 @@ async function mountMode({datasets, settings, container, mode, switchMode}) {
       ${view.controls}
       ${source}
       <div class="result-toolbar">${unused}<div class="d-flex flex-wrap gap-3">${reset}${share.button}${download}</div></div>${share.feedback}
+      ${layoutSection}
     </div></section>`, view.panel ?? '');
   bus.on('stateChanged', share.clear);
   bus.on('reactionSourceChanged', share.clear);
@@ -278,4 +283,37 @@ function createAdvancedMode({bus, repo, state, filter, builder}) {
     },
     dispose() {panel._destroyChoicesInstances();},
   };
+}
+
+// Graph layout options, folded into one collapsible section so they don't crowd the settings:
+// force preset, grid snapping and, only with a grid, its size and whether physics keeps acting.
+// The summary line tells the current choice while folded.
+function createLayoutSection(renderer) {
+  const preset = Controls.select(FORCE_PRESET_IDS, {label: 'Force preset', value: renderer.forcePresetId,
+    format: id => getForcePreset(id).label});
+  const settle = Controls.range([SETTLE_SECONDS.min, SETTLE_SECONDS.max], {label: 'Settling time (s, 0 = none)', value: renderer.settleSeconds, step: SETTLE_SECONDS.step});
+  const grid = Controls.select(SNAP_GRID_IDS, {label: 'Grid snapping', value: renderer.snapGridId, format: snapGridLabel});
+  const scale = Controls.range([SNAP_SCALE.min, SNAP_SCALE.max], {label: 'Grid size (%)', value: renderer.snapScale, step: SNAP_SCALE.step});
+  const hint = html`<small class="fg-3">Settling time 0 freezes everything on the grid. Right-click a node to pin it where it is.</small>`;
+  const gridOptions = html`<div class="d-flex flex-column gap-3">${scale}${hint}</div>`;
+  const summary = html`<span class="fg-3 small ms-2"></span>`;
+  const refresh = () => {
+    const on = grid.value !== 'off';
+    gridOptions.hidden = !on;
+    summary.textContent = [`${getForcePreset(preset.value).label} ${settle.value ? `${settle.value} s` : 'static'}`,
+      on && `${snapGridLabel(grid.value)} grid ${scale.value}%`].filter(Boolean).join(' · ');
+  };
+  preset.addEventListener('input', () => {renderer.setForcePreset(preset.value); refresh();});
+  settle.addEventListener('input', () => {renderer.setSettleSeconds(settle.value); refresh();});
+  grid.addEventListener('input', () => {renderer.setSnapGrid(grid.value); refresh();});
+  scale.addEventListener('input', () => {renderer.setSnapScale(scale.value); refresh();});
+  refresh();
+
+  const details = html`<details class="accordion-item"><summary class="accordion-header">Layout${summary}</summary>
+    <div class="accordion-body d-flex flex-column gap-3">${preset}${settle}${grid}${gridOptions}</div></details>`;
+  try {details.open = localStorage.getItem(LAYOUT_OPEN_KEY) === 'true';} catch {/* closed by default */}
+  details.addEventListener('toggle', () => {
+    try {localStorage.setItem(LAYOUT_OPEN_KEY, String(details.open));} catch {/* only loses the preference */}
+  });
+  return html`<div class="accordion mt-3">${details}</div>`;
 }

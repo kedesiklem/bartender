@@ -1,4 +1,4 @@
-// DOM tests for the tag right-click context menu (GraphRenderer._showTagContextMenu and
+// DOM tests for the node right-click context menus (GraphRenderer._showNodeContextMenu and
 // friends), using the same real jsdom + d3 + data pipeline setup as
 // GraphRenderer.incrementalUpdate.test.js.
 
@@ -122,15 +122,39 @@ test("Escape closes the menu", async () => {
   assert.equal(document.querySelector('[role="menu"]'), null);
 });
 
-test("right-clicking a material node does not open the tag menu (browser default is left alone)", async () => {
-  await setupDom();
+test("right-clicking a material node opens its actions menu, listing each action with its shortcut", async () => {
+  const { graphRenderer } = await setupDom();
+  const picked = [];
+  graphRenderer._selectMaterialAsProduct = (node) => picked.push(node.id);
 
   const materialEl = document.querySelector(".material-node");
   assert.ok(materialEl);
   const event = fireEvent(materialEl, "contextmenu");
 
-  assert.equal(document.querySelector('[role="menu"]'), null);
-  assert.equal(event.defaultPrevented, false, "the native context menu must not be suppressed for materials");
+  const menu = document.querySelector('[role="menu"]');
+  assert.ok(menu, "a context menu should have been added to the document");
+  assert.equal(event.defaultPrevented, true);
+  const items = [...menu.querySelectorAll("button")];
+  const labelOf = (b) => b.firstChild.textContent;
+  assert.ok(items.some((b) => labelOf(b) === "Set as reagent" && b.querySelector(".context-menu-shortcut")?.textContent === "Ctrl+Click"));
+  assert.ok(items.some((b) => labelOf(b) === "Set as product"));
+  assert.ok(items.some((b) => labelOf(b) === "Open wiki page"));
+  assert.ok(!items.some((b) => labelOf(b) === "Open actions menu"), "the menu does not list itself");
+  assert.ok(!items.some((b) => labelOf(b).includes("all materials")), "tag entries are not shown for materials");
+
+  const materialId = materialEl.__data__.id;
+  items.find((b) => labelOf(b) === "Set as product").dispatchEvent(new window.Event("click", { bubbles: true }));
+  assert.equal(document.querySelector('[role="menu"]'), null, "running an entry closes the menu");
+  assert.deepEqual(picked, [materialId]);
+});
+
+test("the material menu leaves out set actions when there are no sets (classic mode)", async () => {
+  const { graphRenderer } = await setupDom();
+  graphRenderer.onQuickAddSet = null;
+  const materialEl = document.querySelector(".material-node");
+  fireEvent(materialEl, "contextmenu");
+  const labels = [...document.querySelectorAll('[role="menu"] button')].map((b) => b.firstChild.textContent);
+  assert.ok(!labels.some((l) => l.includes("new set")));
 });
 
 test("in fullscreen the menu is attached inside the fullscreen element (otherwise it is not rendered)", async () => {

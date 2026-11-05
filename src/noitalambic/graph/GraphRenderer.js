@@ -8,6 +8,8 @@ import { CONFIG } from "../config/config.js";
 import { UIHelper } from "../ui/UIHelper.js";
 import {allowGraphGesture} from './viewport.js';
 import { getSharedShortcutManager, formatCombo } from "../core/ShortcutManager.js";
+import { getForcePreset, loadForcePresetId, saveForcePresetId, alphaDecayFor, clampSettleSeconds, loadSettleSeconds, saveSettleSeconds } from "./forcePresets.js";
+import { getSnapGrid, loadSnapGridId, saveSnapGridId, loadSnapScale, saveSnapScale, clampScale, snapAll, nearestFreeCell, occupiedCells, forEachLatticePointInView, latticeTooDense } from "./gridSnap.js";
 
 export class GraphRenderer {
   static DOUBLE_CLICK_DELAY = 300;
@@ -21,6 +23,11 @@ export class GraphRenderer {
     this.graphDataBuilder = graphDataBuilder;
     this.shortcutManager = shortcutManager ?? getSharedShortcutManager();
     this.onQuickAddSet = onQuickAddSet;
+    this.forcePresetId = loadForcePresetId();
+    this.settleSeconds = loadSettleSeconds();
+    this.snapGridId = loadSnapGridId();
+    this.snapScale = loadSnapScale();
+    this._snapTimer = null;
     this._pendingClick = null; // single-click action waiting to see if a double-click follows
     // Tag tooltips mention the menu shortcut: refresh them when it is rebound.
     this._unsubscribeShortcuts = this.shortcutManager.subscribe(() => this._nodeSelection?.filter((d) => d.type === "tag").each((d, i, els) => this._updateTagNode(d, d3.select(els[i]))));
@@ -77,6 +84,13 @@ export class GraphRenderer {
     });
 
     const visibleLinks = this.graphDataBuilder.filterVisibleLinks(linkArray, visibleNodes);
+    // Visible degree, read by the force presets (link strength, degree-scaled repulsion). Set
+    // before the simulation sees the nodes, since d3 evaluates strengths when nodes are assigned.
+    visibleNodes.forEach((node) => (node.degree = 0));
+    visibleLinks.forEach(({ source, target }) => {
+      source.degree += 1;
+      target.degree += 1;
+    });
 
     // Carry over position/velocity from whatever is already on screen, keyed by node id, so a
     // node that persists across this update does not jump; only genuinely new nodes get a fresh
@@ -90,15 +104,47 @@ export class GraphRenderer {
         node.vy = previous.vy;
         node.fx = previous.fx;
         node.fy = previous.fy;
+        node.pinned = previous.pinned;
       }
     });
+    const newCount = visibleNodes.filter((node) => !this._nodesById.has(node.id)).length;
+    this._placeNewNodesNearNeighbors(visibleNodes, visibleLinks);
     this._nodesById = new Map(visibleNodes.map((node) => [node.id, node]));
 
     const isMounted = this._svg && container.contains(this._svg.node());
     if (!isMounted) {
       this._fullSetup(container, width, height, visibleNodes, visibleLinks, linkArray);
     } else {
-      this._incrementalUpdate(visibleNodes, visibleLinks, linkArray, width, height);
+      this._incrementalUpdate(visibleNodes, visibleLinks, linkArray, width, height, newCount);
+    }
+  }
+
+  // A new node starts next to an already placed neighbor (a tag's materials around the tag, a
+  // new reaction next to its reagents) instead of at d3's default spot around the origin, far from
+  // everything: the layout then only has to settle it locally. Several passes, so chains of new
+  // nodes (reaction -> new tag -> its new materials) are placed outward from what exists.
+  _placeNewNodesNearNeighbors(visibleNodes, visibleLinks) {
+    const neighbors = new Map(visibleNodes.map((node) => [node, []]));
+    visibleLinks.forEach(({ source, target }) => {
+      neighbors.get(source)?.push(target);
+      neighbors.get(target)?.push(source);
+    });
+    const placed = new Set(visibleNodes.filter((node) => Number.isFinite(node.x)));
+    if (placed.size === 0) return;
+    const spread = getForcePreset(this.forcePresetId).linkDistance * 0.6;
+    for (let pass = 0; pass < 4; pass++) {
+      const placedThisPass = [];
+      visibleNodes.forEach((node) => {
+        if (placed.has(node)) return;
+        const anchor = neighbors.get(node).find((n) => placed.has(n));
+        if (!anchor) return;
+        const angle = Math.random() * 2 * Math.PI;
+        node.x = anchor.x + Math.cos(angle) * spread;
+        node.y = anchor.y + Math.sin(angle) * spread;
+        placedThisPass.push(node);
+      });
+      if (placedThisPass.length === 0) break;
+      placedThisPass.forEach((node) => placed.add(node));
     }
   }
 
@@ -175,6 +221,20 @@ export class GraphRenderer {
     this._nodeSelection = this._joinNodes(g, visibleNodes, linkArray);
 
     this._simulation.on("tick", () => this._onTick());
+    // Snap once the layout has settled (initial layout, preset change, new nodes coming in): as
+    // soon as it looks settled (CONFIG.graph.snapAlpha), or when d3 stops on its own.
+    this._simulation.on("tick.snap", () => {
+      if (this._snapGrid() && this._simulation.alpha() < CONFIG.graph.snapAlpha) {
+        this._simulation.stop();
+        this._snapToGrid();
+      } else {
+        this._setSnapGridSuspended(!!this._snapGrid());
+      }
+    });
+    this._simulation.on("end.snap", () => this._snapToGrid());
+    this._configureGridForce();
+    this._drawSnapGrid();
+    if (this._snapGrid()) this._relayout(1);
     // Force layout math (d3-force's timer) schedules its first tick asynchronously, so without
     // this, freshly joined elements would sit with no position at all for a brief moment. Paint
     // the current state immediately instead of waiting for that first async tick.
@@ -189,6 +249,7 @@ export class GraphRenderer {
       if (this._resizeHandler) window.removeEventListener("resize", this._resizeHandler);
       resizeObserver?.disconnect();
       this._simulation?.stop();
+      this._stopSnapAnimation();
     };
   }
 
@@ -196,20 +257,33 @@ export class GraphRenderer {
   // screen (keyed by id), so unaffected nodes/links are left completely untouched, and only the
   // difference is created or removed. A gentle reheat lets the simulation settle the change in
   // without a full, disruptive re-layout.
-  _incrementalUpdate(visibleNodes, visibleLinks, linkArray, width, height) {
+  _incrementalUpdate(visibleNodes, visibleLinks, linkArray, width, height, newCount = 0) {
     // The SVG's own size no longer gets recomputed for free on every render now that it isn't
     // rebuilt from scratch each time (previously any render implicitly refreshed it); the
     // container can resize for reasons other than a window resize event (e.g. the side panel
     // being hidden), so keep it in sync explicitly here too.
     this._svg.attr("width", width).attr("height", height).attr("viewBox", [0, 0, width, height]);
+    this._drawSnapGrid();
 
     this._linkGroupSelection = this._joinLinks(this._g, visibleLinks);
     this._nodeSelection = this._joinNodes(this._g, visibleNodes, linkArray);
 
+    const fresh = visibleNodes.filter((node) => !Number.isFinite(node.x));
     this._simulation.nodes(visibleNodes);
+    if (this._noSettling()) this._centerFreshNodes(fresh, width, height);
     this._simulation.force("link").links(visibleLinks);
-    this._simulation.force("center", d3.forceCenter(width / 2, height / 2));
-    this._simulation.alpha(0.4).restart();
+    this._setCenterForces(this._simulation, width, height);
+    // A snap animation in flight would fight the new layout; _relayout() settles everything and,
+    // with a grid, snaps it back.
+    if (this._snapGrid()) this._stopSnapAnimation();
+    // Mostly new nodes (e.g. a saved config loaded): a gentle reheat can't untangle that, so
+    // lay it out from scratch, untangle phase included.
+    if (newCount > visibleNodes.length / 2) {
+      this._applyForcePreset(this._simulation, width, height);
+      this._relayout(1);
+    } else {
+      this._relayout(0.4);
+    }
 
     // Same reasoning as in _fullSetup: paint immediately with whatever positions are already
     // known (carried-over ones for persisting nodes, computed defaults for new ones) instead of
@@ -242,6 +316,18 @@ export class GraphRenderer {
     wrapper.style.cssText = "width:100%;height:100%;overflow:hidden;position:relative;";
     container.appendChild(wrapper);
 
+    // Grid snapping backdrop: a canvas under the SVG drawing every visible lattice point, from the
+    // grid's own coordinates and the current zoom. (An SVG <pattern> drifted away from the real
+    // lattice: browsers rasterize pattern tiles at rounded sizes, so the error piles up tile after
+    // tile.) Outside the SVG, it is never part of an export.
+    const gridCanvas = document.createElement("canvas");
+    gridCanvas.className = "snap-grid";
+    gridCanvas.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;";
+    wrapper.appendChild(gridCanvas);
+    this._gridCanvas = gridCanvas;
+    this._gridContext = undefined; // fetched on first draw, per canvas
+    this._zoomTransform = d3.zoomIdentity;
+
     const svg = d3
       .select(wrapper)
       .append("svg")
@@ -260,7 +346,11 @@ export class GraphRenderer {
       .extent(() => [[0, 0], [Math.max(1, container.clientWidth), Math.max(1, container.clientHeight)]])
       .filter(event => allowGraphGesture(event, container))
       .scaleExtent([0.1, 4])
-      .on("zoom", (event) => g.attr("transform", event.transform));
+      .on("zoom", (event) => {
+        g.attr("transform", event.transform);
+        this._zoomTransform = event.transform;
+        this._scheduleSnapGridDraw();
+      });
 
     svg.call(zoom);
     svg.on("click", () => this._resetHighlighting(d3.selectAll(".node")));
@@ -354,21 +444,325 @@ export class GraphRenderer {
   }
 
   _createSimulation(visibleNodes, visibleLinks, width, height) {
-    return d3
+    const fresh = visibleNodes.filter((node) => !Number.isFinite(node.x));
+    const simulation = d3
       .forceSimulation(visibleNodes)
-      .force(
-        "link",
-        d3
-          .forceLink(visibleLinks)
-          .id((d) => d.id)
-          .distance(CONFIG.graph.sizes.linkDistance),
-      )
-      .force("charge", d3.forceManyBody().strength(CONFIG.graph.sizes.chargeStrength))
+      .force("link", d3.forceLink(visibleLinks).id((d) => d.id))
+      .force("charge", d3.forceManyBody())
+      .force("collision", d3.forceCollide());
+    this._applyForcePreset(simulation, width, height);
+    if (this._noSettling()) {
+      simulation.stop();
+      this._centerFreshNodes(fresh, width, height);
+    }
+    return simulation;
+  }
+
+  // Settling time 0: the simulation never runs (see SETTLE_SECONDS).
+  _noSettling() {
+    return this.settleSeconds === 0;
+  }
+
+  // d3 seeds unpositioned nodes on a spiral around the origin (the top-left corner) and relies on
+  // the simulation to bring them in; with no settling, put that spiral in the middle of the view.
+  _centerFreshNodes(nodes, width, height) {
+    nodes.forEach((node) => {
+      node.x += width / 2;
+      node.y += height / 2;
+    });
+  }
+
+  // Wakes the simulation up to `alpha` - unless there is no settling, then only repaints.
+  _reheat(alpha) {
+    const simulation = this._simulation;
+    if (!simulation) return;
+    if (this._noSettling()) {
+      simulation.stop();
+      this._onTick();
+      return;
+    }
+    simulation.alpha(Math.max(simulation.alpha(), alpha)).restart();
+  }
+
+  // Configures every force from the active preset (CONFIG.graph.forcePresets) and arms the
+  // untangle -> compact phase switch. Only a fresh layout (initial render, preset change)
+  // untangles; later reheats (incremental updates, drag, resize) keep the compact repulsion so
+  // existing nodes don't get blown apart again.
+  _applyForcePreset(simulation, width, height) {
+    const f = getForcePreset(this.forcePresetId);
+    const link = simulation.force("link").distance(f.linkDistance);
+    // A null strength keeps d3's default: 1 / degree of the less connected end.
+    link.strength((l) => {
+      const strength = l.type === "tag-association" ? f.tagLinkStrength : f.linkStrength;
+      return strength ?? 1 / Math.min(l.source.degree || 1, l.target.degree || 1);
+    });
+    const charge = (base) => (d) => base * (1 + (f.degreeCharge || 0) * (Math.sqrt(d.degree || 1) - 1));
+    simulation.force("charge").strength(charge(f.untangleCharge)).distanceMax(f.chargeDistanceMax);
+    simulation.force("collision").radius((d) => d.radius + f.collisionPadding);
+    simulation.alphaDecay(alphaDecayFor(this.settleSeconds));
+    this._setCenterForces(simulation, width, height);
+
+    // Kept as a method (not only a tick listener) because _relayout() ticks by hand, and manual
+    // simulation.tick() calls dispatch no "tick" event.
+    let compact = !(f.compactAlpha > 0);
+    if (compact) simulation.force("charge").strength(charge(f.compactCharge));
+    this._checkLayoutPhase = () => {
+      if (compact || simulation.alpha() >= f.compactAlpha) return;
+      compact = true;
+      simulation.force("charge").strength(charge(f.compactCharge));
+    };
+    simulation.on("tick.phase", () => this._checkLayoutPhase());
+    if (simulation === this._simulation) this._configureGridForce();
+  }
+
+  // Reheats the layout to `alpha`. With a grid, nodes end up on it anyway, so watching them
+  // settle frame by frame is only a wait: the settling is computed at once (no frames drawn) and
+  // nodes glide straight from where they are to their cell.
+  _relayout(alpha) {
+    const simulation = this._simulation;
+    if (this._noSettling()) {
+      simulation.stop();
+      if (this._snapGrid()) this._snapToGrid();
+      else this._onTick();
+      return;
+    }
+    simulation.alpha(alpha);
+    if (!this._snapGrid()) {
+      simulation.restart();
+      return;
+    }
+    simulation.stop();
+    const starts = new Map(simulation.nodes().map((node) => [node, { x: node.x, y: node.y }]));
+    for (let i = 0; i < 1000 && simulation.alpha() >= CONFIG.graph.snapAlpha; i++) {
+      simulation.tick();
+      this._checkLayoutPhase();
+    }
+    this._snapToGrid(starts);
+  }
+
+  // Changes how long layouts take to settle (seconds, see SETTLE_SECONDS). Applies to the layout
+  // in progress right away, and to every later one.
+  setSettleSeconds(seconds) {
+    const wasStatic = this._noSettling();
+    this.settleSeconds = clampSettleSeconds(seconds);
+    saveSettleSeconds(this.settleSeconds);
+    if (!this._simulation) return;
+    this._simulation.alphaDecay(alphaDecayFor(this.settleSeconds));
+    if (this._noSettling()) this._simulation.stop();
+    else if (wasStatic) this._relayout(0.5); // settling back on: let the layout balance itself
+  }
+
+  // Switches the force preset and lays the current graph out again with it.
+  setForcePreset(id) {
+    this.forcePresetId = id;
+    saveForcePresetId(id);
+    if (!this._simulation || !this._svg) return;
+    this._stopSnapAnimation();
+    this._releaseUnpinned(this._simulation.nodes());
+    this._applyForcePreset(this._simulation, Number(this._svg.attr("width")), Number(this._svg.attr("height")));
+    this._relayout(1);
+  }
+
+  // Switches the snap grid ("off" or a CONFIG.graph.snapGrids id). Turning it on, or changing
+  // grid, snaps the current positions right away; turning it off releases every node to the
+  // simulation again.
+  setSnapGrid(id) {
+    this.snapGridId = id;
+    saveSnapGridId(id);
+    this._drawSnapGrid();
+    if (!this._simulation) return;
+    this._stopSnapAnimation();
+    this._releaseUnpinned(this._simulation.nodes());
+    this._configureGridForce();
+    if (this._snapGrid()) this._snapToGrid();
+    else this._reheat(0.3);
+  }
+
+  // Grid force: pulls each free node toward its own cell, so the layout settles onto the grid
+  // while gravity and links keep acting (a grid with no physics at all = settling time 0). Cells are re-assigned every few ticks from
+  // current positions (one node per cell; pinned nodes hold theirs).
+  _configureGridForce() {
+    if (!this._simulation) return;
+    const grid = this._snapGrid();
+    if (!grid) {
+      this._simulation.force("grid", null);
+      return;
+    }
+    const strength = CONFIG.graph.snapPhysicsStrength;
+    let nodes = [];
+    let targets = null;
+    let ticks = 0;
+    const force = (alpha) => {
+      if (!targets || ticks++ % 10 === 0) {
+        targets = snapAll(nodes, grid, { keep: new Set(nodes.filter((node) => node.fx != null)) });
+      }
+      targets.forEach((target, node) => {
+        if (node.fx != null) return;
+        node.vx += (target.x - node.x) * strength * alpha;
+        node.vy += (target.y - node.y) * strength * alpha;
+      });
+    };
+    force.initialize = (simulationNodes) => {
+      nodes = simulationNodes;
+      targets = null;
+    };
+    this._simulation.force("grid", force);
+  }
+
+  // Changes the grid size (percentage of the configured spacing, see SNAP_SCALE) and re-snaps
+  // every node onto the resized grid from where it is now.
+  setSnapScale(scale) {
+    this.snapScale = clampScale(scale);
+    saveSnapScale(this.snapScale);
+    this._drawSnapGrid();
+    this._configureGridForce();
+    if (!this._simulation || !this._snapGrid()) return;
+    this._stopSnapAnimation();
+    this._releaseUnpinned(this._simulation.nodes());
+    this._snapToGrid();
+  }
+
+  _snapGrid() {
+    return getSnapGrid(this.snapGridId, this.snapScale);
+  }
+
+  // Releases nodes to the simulation, except those pinned on purpose (node.pinned), which keep
+  // their position (_snapToGrid() then moves them onto the closest cell of a new grid).
+  _releaseUnpinned(nodes) {
+    nodes.forEach((node) => {
+      if (node.pinned) return;
+      node.fx = null;
+      node.fy = null;
+    });
+  }
+
+  _setPinned(node, pinned) {
+    const simulation = this._simulation;
+    node.pinned = pinned;
+    if (pinned) {
+      const grid = this._snapGrid();
+      const cell = grid ? nearestFreeCell(grid, node.x, node.y, occupiedCells(grid, simulation.nodes(), node)) : node;
+      node.x = node.fx = cell.x;
+      node.y = node.fy = cell.y;
+      node.vx = node.vy = 0;
+      this._onTick();
+    } else {
+      node.fx = null;
+      node.fy = null;
+      this._reheat(0.3);
+    }
+    this._refreshPinBadges();
+  }
+
+  // Small badge on nodes pinned on purpose.
+  _refreshPinBadges() {
+    this._nodeSelection?.each((d, i, els) => {
+      const selection = d3.select(els[i]);
+      const badge = selection.select(":scope > .pin-badge");
+      if (!d.pinned) return badge.remove();
+      if (!badge.empty()) return;
+      const offset = d.radius * 0.72;
+      selection.append("circle").attr("class", "pin-badge").attr("cx", offset).attr("cy", -offset).attr("r", 5)
+        .attr("fill", "#ffffff").attr("stroke", "#1b1b1f").attr("stroke-width", 2).style("pointer-events", "none");
+    });
+  }
+
+  // Moves every node to its own grid cell, animated (from `starts`, or where nodes are now), and
+  // leaves it free: gravity and links act again on the next reheat, the grid force keeping it
+  // near its cell. Nodes pinned on purpose keep their cell (the closest one) and stay pinned.
+  _snapToGrid(starts = null) {
+    const grid = this._snapGrid();
+    if (!grid || !this._simulation) return;
+    this._stopSnapAnimation();
+    this._setSnapGridSuspended(false);
+    const nodes = this._simulation.nodes();
+    const keep = new Set(nodes.filter((node) => node.fx != null));
+    const targets = snapAll(nodes, grid, { keep });
+    starts ??= new Map(nodes.map((node) => [node, { x: node.x, y: node.y }]));
+    targets.forEach((target, node) => {
+      node.vx = 0;
+      node.vy = 0;
+      if (node.fx != null) {
+        node.fx = target.x;
+        node.fy = target.y;
+      }
+    });
+    const duration = CONFIG.graph.snapAnimationMs;
+    const step = (t) => {
+      targets.forEach((target, node) => {
+        const start = starts.get(node);
+        node.x = start.x + (target.x - start.x) * t;
+        node.y = start.y + (target.y - start.y) * t;
+      });
+      this._onTick();
+    };
+    if (!(duration > 0)) return step(1);
+    this._snapTimer = d3.timer((elapsed) => {
+      const t = Math.min(1, elapsed / duration);
+      step(d3.easeCubicOut(t));
+      if (t === 1) this._stopSnapAnimation();
+    });
+  }
+
+  _stopSnapAnimation() {
+    this._snapTimer?.stop();
+    this._snapTimer = null;
+  }
+
+  // Dims the grid backdrop while a layout runs with snapping suspended.
+  _setSnapGridSuspended(suspended) {
+    if (this._gridCanvas) this._gridCanvas.style.opacity = suspended ? "0.35" : "";
+  }
+
+  // Zoom/pan fire many events per frame: draw at most once per frame.
+  _scheduleSnapGridDraw() {
+    if (typeof window.requestAnimationFrame !== "function") return this._drawSnapGrid();
+    if (this._snapGridFrame) return;
+    this._snapGridFrame = window.requestAnimationFrame(() => {
+      this._snapGridFrame = null;
+      this._drawSnapGrid();
+    });
+  }
+
+  // Draws every lattice point in view (see forEachLatticePointInView), or nothing when snapping
+  // is off or the points would be too dense on screen to tell apart (latticeTooDense).
+  _drawSnapGrid() {
+    const canvas = this._gridCanvas;
+    if (!canvas || !this._svg) return;
+    const grid = this._snapGrid();
+    const width = Number(this._svg.attr("width")) || 0;
+    const height = Number(this._svg.attr("height")) || 0;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.style.display = grid ? "" : "none";
+    if (!grid) return;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    // No 2D canvas support (e.g. jsdom in tests): snapping still works, only the backdrop is skipped.
+    if (this._gridContext === undefined) {
+      this._gridContext = typeof window.CanvasRenderingContext2D === "function" ? canvas.getContext("2d") : null;
+    }
+    const context = this._gridContext;
+    if (!context) return;
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const transform = this._zoomTransform ?? d3.zoomIdentity;
+    if (latticeTooDense(grid, transform.k)) return;
+    const spacing = Math.min(grid.dx, grid.dy) * transform.k;
+    const size = Math.max(1, Math.min(3, spacing * 0.12));
+    context.fillStyle = spacing < 8 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.22)";
+    forEachLatticePointInView(grid, transform, width, height, (x, y) => context.fillRect(x - size / 2, y - size / 2, size, size));
+  }
+
+  // forceCenter only translates the whole graph; the weak forceX/forceY gravity is what keeps
+  // disconnected components from drifting apart.
+  _setCenterForces(simulation, width, height) {
+    const g = getForcePreset(this.forcePresetId).gravity;
+    simulation
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force(
-        "collision",
-        d3.forceCollide().radius((d) => d.radius + 15),
-      );
+      .force("x", d3.forceX(width / 2).strength(g))
+      .force("y", d3.forceY(height / 2).strength(g));
   }
 
   // Uses a keyed .join(): a node that persists between two renders keeps its existing DOM
@@ -380,21 +774,49 @@ export class GraphRenderer {
   // simulation on the next render).
   _joinNodes(g, visibleNodes, linkArray) {
     const simulation = this._simulation;
+    // A normal d3 drag (neighbors follow, gravity keeps working); with a grid the dragged node
+    // moves cell to cell. On release it is let go, unless it was pinned on purpose ("Pin
+    // position" in its menu): then it stays where it is dropped, physics never moving it. With
+    // no settling (settling time 0) nothing ticks, so the node is moved by hand and stays put.
     const drag = d3
       .drag()
       .on("start", (event, d) => {
+        if (this._noSettling()) return;
+        this._stopSnapAnimation();
         if (!event.active) simulation.alphaTarget(0.3).restart();
         d.fx = d.x;
         d.fy = d.y;
       })
       .on("drag", (event, d) => {
-        d.fx = event.x;
-        d.fy = event.y;
+        const grid = this._snapGrid();
+        const at = grid ? grid.nearest(event.x, event.y) : event;
+        d.fx = at.x;
+        d.fy = at.y;
+        if (this._noSettling()) {
+          this._stopSnapAnimation();
+          d.x = at.x;
+          d.y = at.y;
+          this._onTick();
+        }
       })
       .on("end", (event, d) => {
-        if (!event.active) simulation.alphaTarget(0);
-        d.fx = null;
-        d.fy = null;
+        const grid = this._snapGrid();
+        if (!this._noSettling() && !event.active) simulation.alphaTarget(0);
+        // Where it lands: the closest free cell with a grid (no two nodes on one cell).
+        if (grid && (d.pinned || this._noSettling())) {
+          const cell = nearestFreeCell(grid, d.fx, d.fy, occupiedCells(grid, simulation.nodes(), d));
+          d.fx = cell.x;
+          d.fy = cell.y;
+          if (this._noSettling()) {
+            d.x = cell.x;
+            d.y = cell.y;
+            this._onTick();
+          }
+        }
+        if (!d.pinned) {
+          d.fx = null;
+          d.fy = null;
+        }
       });
 
     let nodesContainer = g.select(":scope > g.nodes-root");
@@ -445,6 +867,8 @@ export class GraphRenderer {
     nodeSelection.on("click contextmenu", (event, d) => this._handleNodeEvent(event, d, nodeSelection, linkArray));
     // Node double-clicks are shortcuts, not zoom-in requests (d3.zoom listens to dblclick on the svg).
     nodeSelection.on("dblclick", (event) => event.stopPropagation());
+    this._nodeSelection = nodeSelection;
+    this._refreshPinBadges();
 
     return nodeSelection;
   }
@@ -477,9 +901,11 @@ export class GraphRenderer {
       .attr("clip-path", `url(#clip-${node.id})`)
       .append("image")
       .attr("href", node.imageUrl)
-      .attr("x", -node.radius * CONFIG.graph.layout.imagePosition)
-      .attr("y", -node.radius * CONFIG.graph.layout.imagePosition)
-      .attr("transform", `scale(${CONFIG.graph.layout.imageScale})`)
+      .attr("x", -CONFIG.graph.layout.textureSize * CONFIG.graph.layout.imageScale / 2)
+      .attr("y", -CONFIG.graph.layout.textureSize * CONFIG.graph.layout.imageScale / 2)
+      .attr("width", CONFIG.graph.layout.textureSize * CONFIG.graph.layout.imageScale)
+      .attr("height", CONFIG.graph.layout.textureSize * CONFIG.graph.layout.imageScale)
+      .attr("preserveAspectRatio", "xMidYMid slice")
       .attr("class", "material-image")
       .on("error", function () {
         d3.select(this).style("display", "none");
@@ -589,7 +1015,7 @@ export class GraphRenderer {
     const toggleCombo = this.shortcutManager.getBinding("toggleTagMaterials");
     const menuCombo = this.shortcutManager.getBinding("openTagMenu");
     if (toggleCombo) tooltipText += `\n${formatCombo(toggleCombo)}: ${visibleCount === totalCount ? "hide" : "show"} them all`;
-    if (menuCombo) tooltipText += `\n${formatCombo(menuCombo)}: show/hide menu`;
+    if (menuCombo) tooltipText += `\n${formatCombo(menuCombo)}: actions menu`;
 
     selection.select(":scope > title").text(tooltipText);
   }
@@ -697,7 +1123,8 @@ export class GraphRenderer {
       openMaterialWiki: (node) => this._openMaterialWiki(node),
       addReagentToNewSet: (node) => this.onQuickAddSet && this.onQuickAddSet(node.id, "reagent"),
       addProductToNewSet: (node) => this.onQuickAddSet && this.onQuickAddSet(node.id, "product"),
-      openTagMenu: (node, event) => this._showTagContextMenu(event, node),
+      openMaterialMenu: (node, event, ctx) => this._showNodeContextMenu(event, node, ctx),
+      openTagMenu: (node, event, ctx) => this._showNodeContextMenu(event, node, ctx),
       toggleTagMaterials: (node) => this.state.toggleTagVisibility(node.id),
     }[actionId];
   }
@@ -711,7 +1138,7 @@ export class GraphRenderer {
       if (!handler) return; // nothing bound: keep the browser's native menu
       event.preventDefault();
       event.stopPropagation();
-      handler(node, event);
+      handler(node, event, { allNodes, linkArray });
       return;
     }
 
@@ -730,12 +1157,12 @@ export class GraphRenderer {
       const { clientX, clientY } = event;
       this._pendingClick = setTimeout(() => {
         this._pendingClick = null;
-        handler(node, { clientX, clientY });
+        handler(node, { clientX, clientY }, { allNodes, linkArray });
       }, GraphRenderer.DOUBLE_CLICK_DELAY);
       return;
     }
 
-    handler(node, event);
+    handler(node, event, { allNodes, linkArray });
   }
 
   _cancelPendingClick() {
@@ -768,14 +1195,43 @@ export class GraphRenderer {
     }
   }
 
-  // A small floating menu with explicit show/hide actions, replacing the old double-click toggle
-  // (which had no way to tell whether it would open or close - here both options are always
-  // spelled out, so a tag can always be closed again regardless of its current state).
-  _showTagContextMenu(event, node) {
-    this._closeContextMenu();
+  // Menu entries for a node: every shortcut action of its scope (so the menu is a discoverable
+  // alternative to the modifier+click shortcuts, with each shortcut shown next to its entry),
+  // except the menu-opening action itself. Tags get explicit show/hide entries instead of the
+  // toggle, whose effect depends on the current state. Entries that can't run here (no sets in
+  // classic mode) are left out.
+  _contextMenuEntries(node, ctx) {
+    const entries = [];
+    if (ctx) entries.push({ label: "Highlight connections", run: () => this._highlightConnections(node, ctx.allNodes, ctx.linkArray) });
+    // Pin a node where it is (on its grid cell, if any) so physics leaves it alone - it can still
+    // be dragged - or let it go again.
+    if (this._simulation) {
+      if (node.pinned) {
+        entries.push({ label: "Unpin position", run: () => this._setPinned(node, false) });
+      } else {
+        entries.push({ label: "Pin position", run: () => this._setPinned(node, true) });
+      }
+    }
+    if (node.type === "tag") {
+      entries.push({ label: "Show all materials", run: () => this.state.showTagMaterials(node.id) });
+      entries.push({ label: "Hide all materials", run: () => this.state.hideTagMaterials(node.id) });
+      return entries;
+    }
+    const menuActions = new Set(["openMaterialMenu", "openTagMenu"]);
+    const needsSets = new Set(["addReagentToNewSet", "addProductToNewSet"]);
+    this.shortcutManager.getActions(node.type).forEach((action) => {
+      if (menuActions.has(action.id) || (needsSets.has(action.id) && !this.onQuickAddSet)) return;
+      const handler = this._actionHandler(action.id);
+      if (!handler) return;
+      const combo = this.shortcutManager.getBinding(action.id);
+      entries.push({ label: action.label, hint: combo ? formatCombo(combo) : "", run: () => handler(node) });
+    });
+    return entries;
+  }
 
-    const materialIds = this.dataRepo.resolveTag(node.id);
-    const tagName = node.tag || node.id;
+  // A small floating menu listing the node's actions (see _contextMenuEntries).
+  _showNodeContextMenu(event, node, ctx = null) {
+    this._closeContextMenu();
 
     const menu = document.createElement("div");
     menu.setAttribute("role", "menu");
@@ -795,27 +1251,32 @@ export class GraphRenderer {
     ].join(";");
 
     const title = document.createElement("div");
-    title.textContent = `[${tagName}]`;
+    title.textContent = node.type === "tag" ? `[${node.tag || node.id}]` : node.name || node.id;
     title.style.cssText = "color:#999;padding:4px 8px;border-bottom:1px solid #444;margin-bottom:4px;";
     menu.appendChild(title);
 
-    const addItem = (label, onClick) => {
+    this._contextMenuEntries(node, ctx).forEach(({ label, hint, run }) => {
       const item = document.createElement("button");
       item.type = "button";
+      item.setAttribute("role", "menuitem");
       item.textContent = label;
       item.style.cssText =
-        "display:block;width:100%;text-align:left;background:none;border:none;color:#fff;padding:6px 8px;cursor:pointer;border-radius:4px;";
+        "display:flex;justify-content:space-between;gap:16px;width:100%;text-align:left;background:none;border:none;color:#fff;padding:6px 8px;cursor:pointer;border-radius:4px;";
+      if (hint) {
+        const hintEl = document.createElement("span");
+        hintEl.className = "context-menu-shortcut";
+        hintEl.textContent = hint;
+        hintEl.style.cssText = "color:#888;";
+        item.appendChild(hintEl);
+      }
       item.addEventListener("mouseenter", () => (item.style.background = "#333"));
       item.addEventListener("mouseleave", () => (item.style.background = "none"));
       item.addEventListener("click", () => {
-        onClick();
         this._closeContextMenu();
+        run();
       });
       menu.appendChild(item);
-    };
-
-    addItem("Show all materials", () => this.state.showTagMaterials(node.id));
-    addItem("Hide all materials", () => this.state.hideTagMaterials(node.id));
+    });
 
     UIHelper.overlayHost().appendChild(menu);
     this._activeContextMenu = menu;
@@ -1016,9 +1477,12 @@ export class GraphRenderer {
     const height = Math.max(1, container.clientHeight);
     const changed = Number(svg.attr('width')) !== width || Number(svg.attr('height')) !== height;
     svg.attr("width", width).attr("height", height).attr("viewBox", `0 0 ${width} ${height}`);
+    if (changed) this._drawSnapGrid();
     if (changed && simulation) {
       simulation.force('center').x(width / 2).y(height / 2);
-      simulation.alpha(Math.max(simulation.alpha(), .1)).restart();
+      simulation.force('x')?.x(width / 2);
+      simulation.force('y')?.y(height / 2);
+      this._reheat(0.1);
     }
   }
 }

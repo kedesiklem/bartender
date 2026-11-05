@@ -68,8 +68,8 @@ function contentFrame(liveSvg, liveContent, padding) {
   return [0, 0, Number(liveSvg.getAttribute("width")) || 800, Number(liveSvg.getAttribute("height")) || 600];
 }
 
-// getBBox() ignores clip-path: each material texture (a 252px image scaled x2, clipped to its
-// node circle) would count as ~500px and leave large blank areas. Clipped content always sits
+// getBBox() ignores clip-path: each material texture (252px, larger than its node, clipped to
+// the node circle) would count at full size and leave large blank areas. Clipped content always sits
 // inside its node, so it is hidden while measuring (display:none content doesn't count) and
 // shown again right after. Synchronous: the hidden state is never painted.
 function measureIgnoringClippedContent(content) {

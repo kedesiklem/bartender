@@ -26,8 +26,9 @@ export const ACTIONS = [
   { id: "openMaterialWiki", scope: "material", label: "Open wiki page", defaultCombo: "Ctrl+Shift+Click" },
   { id: "addReagentToNewSet", scope: "material", label: "Add as reagent to a new set", defaultCombo: "Alt+Click" },
   { id: "addProductToNewSet", scope: "material", label: "Add as product to a new set", defaultCombo: "Shift+Alt+Click" },
+  { id: "openMaterialMenu", scope: "material", label: "Open actions menu", defaultCombo: "RightClick" },
   { id: "toggleTagMaterials", scope: "tag", label: "Show/hide all its materials", defaultCombo: "DoubleClick" },
-  { id: "openTagMenu", scope: "tag", label: "Open show/hide menu", defaultCombo: "RightClick" },
+  { id: "openTagMenu", scope: "tag", label: "Open actions menu", defaultCombo: "RightClick" },
 ];
 
 export const SCOPE_LABELS = { material: "Material", tag: "Tag" };
